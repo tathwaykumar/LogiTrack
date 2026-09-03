@@ -2,12 +2,12 @@
 -- PostgreSQL database dump
 --
 
-\restrict pcBSqycYvei27yYu0KA3BR7K4ecBwDnZMbbT7eg93EgcoCnJEKXXjtEy312kQko
+\restrict 2QTyQpUTrPtQi1vft4e7rAFc7ga3JI0Jw8GZjg4oSgNYyIX214HqsyWnhk9hmJO
 
 -- Dumped from database version 18.6
 -- Dumped by pg_dump version 18.6
 
--- Started on 2026-09-03 22:16:23
+-- Started on 2026-09-03 22:52:25
 
 SET statement_timeout = 0;
 SET lock_timeout = 0;
@@ -20,6 +20,71 @@ SET check_function_bodies = false;
 SET xmloption = content;
 SET client_min_messages = warning;
 SET row_security = off;
+
+--
+-- TOC entry 257 (class 1255 OID 16795)
+-- Name: calculate_order_total(integer); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION public.calculate_order_total(p_order_id integer) RETURNS numeric
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    total NUMERIC(12,2);
+BEGIN
+    SELECT COALESCE(SUM(quantity * unit_price), 0)
+    INTO total
+    FROM order_item
+    WHERE order_id = p_order_id;
+
+    RETURN total;
+END;
+$$;
+
+
+ALTER FUNCTION public.calculate_order_total(p_order_id integer) OWNER TO postgres;
+
+--
+-- TOC entry 256 (class 1255 OID 16793)
+-- Name: update_shipment_status(); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION public.update_shipment_status() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    UPDATE shipment
+    SET shipment_status = NEW.status
+    WHERE shipment_id = NEW.shipment_id;
+
+    RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION public.update_shipment_status() OWNER TO postgres;
+
+--
+-- TOC entry 258 (class 1255 OID 16796)
+-- Name: update_shipment_status(integer, character varying); Type: PROCEDURE; Schema: public; Owner: postgres
+--
+
+CREATE PROCEDURE public.update_shipment_status(IN p_shipment_id integer, IN p_status character varying)
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    UPDATE shipment
+    SET shipment_status = p_status
+    WHERE shipment_id = p_shipment_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Shipment % does not exist', p_shipment_id;
+    END IF;
+END;
+$$;
+
+
+ALTER PROCEDURE public.update_shipment_status(IN p_shipment_id integer, IN p_status character varying) OWNER TO postgres;
 
 SET default_tablespace = '';
 
@@ -59,7 +124,7 @@ CREATE SEQUENCE public.customer_customer_id_seq
 ALTER SEQUENCE public.customer_customer_id_seq OWNER TO postgres;
 
 --
--- TOC entry 5235 (class 0 OID 0)
+-- TOC entry 5258 (class 0 OID 0)
 -- Dependencies: 223
 -- Name: customer_customer_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
 --
@@ -102,7 +167,7 @@ CREATE SEQUENCE public.delivery_delivery_id_seq
 ALTER SEQUENCE public.delivery_delivery_id_seq OWNER TO postgres;
 
 --
--- TOC entry 5236 (class 0 OID 0)
+-- TOC entry 5259 (class 0 OID 0)
 -- Dependencies: 246
 -- Name: delivery_delivery_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
 --
@@ -159,7 +224,7 @@ CREATE SEQUENCE public.driver_vehicle_assignment_assignment_id_seq
 ALTER SEQUENCE public.driver_vehicle_assignment_assignment_id_seq OWNER TO postgres;
 
 --
--- TOC entry 5237 (class 0 OID 0)
+-- TOC entry 5260 (class 0 OID 0)
 -- Dependencies: 230
 -- Name: driver_vehicle_assignment_assignment_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
 --
@@ -204,7 +269,7 @@ CREATE SEQUENCE public.employee_employee_id_seq
 ALTER SEQUENCE public.employee_employee_id_seq OWNER TO postgres;
 
 --
--- TOC entry 5238 (class 0 OID 0)
+-- TOC entry 5261 (class 0 OID 0)
 -- Dependencies: 225
 -- Name: employee_employee_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
 --
@@ -269,7 +334,7 @@ CREATE SEQUENCE public.invoice_invoice_id_seq
 ALTER SEQUENCE public.invoice_invoice_id_seq OWNER TO postgres;
 
 --
--- TOC entry 5239 (class 0 OID 0)
+-- TOC entry 5262 (class 0 OID 0)
 -- Dependencies: 250
 -- Name: invoice_invoice_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
 --
@@ -328,7 +393,7 @@ CREATE SEQUENCE public.orders_order_id_seq
 ALTER SEQUENCE public.orders_order_id_seq OWNER TO postgres;
 
 --
--- TOC entry 5240 (class 0 OID 0)
+-- TOC entry 5263 (class 0 OID 0)
 -- Dependencies: 237
 -- Name: orders_order_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
 --
@@ -373,7 +438,7 @@ CREATE SEQUENCE public.payment_payment_id_seq
 ALTER SEQUENCE public.payment_payment_id_seq OWNER TO postgres;
 
 --
--- TOC entry 5241 (class 0 OID 0)
+-- TOC entry 5264 (class 0 OID 0)
 -- Dependencies: 248
 -- Name: payment_payment_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
 --
@@ -417,7 +482,7 @@ CREATE SEQUENCE public.product_product_id_seq
 ALTER SEQUENCE public.product_product_id_seq OWNER TO postgres;
 
 --
--- TOC entry 5242 (class 0 OID 0)
+-- TOC entry 5265 (class 0 OID 0)
 -- Dependencies: 234
 -- Name: product_product_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
 --
@@ -456,7 +521,7 @@ CREATE SEQUENCE public.role_role_id_seq
 ALTER SEQUENCE public.role_role_id_seq OWNER TO postgres;
 
 --
--- TOC entry 5243 (class 0 OID 0)
+-- TOC entry 5266 (class 0 OID 0)
 -- Dependencies: 219
 -- Name: role_role_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
 --
@@ -500,7 +565,7 @@ CREATE SEQUENCE public.route_route_id_seq
 ALTER SEQUENCE public.route_route_id_seq OWNER TO postgres;
 
 --
--- TOC entry 5244 (class 0 OID 0)
+-- TOC entry 5267 (class 0 OID 0)
 -- Dependencies: 240
 -- Name: route_route_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
 --
@@ -562,13 +627,56 @@ CREATE SEQUENCE public.shipment_shipment_id_seq
 ALTER SEQUENCE public.shipment_shipment_id_seq OWNER TO postgres;
 
 --
--- TOC entry 5245 (class 0 OID 0)
+-- TOC entry 5268 (class 0 OID 0)
 -- Dependencies: 242
 -- Name: shipment_shipment_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
 --
 
 ALTER SEQUENCE public.shipment_shipment_id_seq OWNED BY public.shipment.shipment_id;
 
+
+--
+-- TOC entry 233 (class 1259 OID 16513)
+-- Name: warehouse; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE public.warehouse (
+    warehouse_id integer NOT NULL,
+    warehouse_name character varying(100) NOT NULL,
+    address character varying(255) NOT NULL,
+    city character varying(50) NOT NULL,
+    capacity numeric(12,2),
+    manager_employee_id integer,
+    status character varying(30) DEFAULT 'ACTIVE'::character varying,
+    CONSTRAINT chk_warehouse_capacity CHECK (((capacity IS NULL) OR (capacity > (0)::numeric)))
+);
+
+
+ALTER TABLE public.warehouse OWNER TO postgres;
+
+--
+-- TOC entry 255 (class 1259 OID 16784)
+-- Name: shipment_summary; Type: VIEW; Schema: public; Owner: postgres
+--
+
+CREATE VIEW public.shipment_summary AS
+ SELECT s.shipment_id,
+    o.order_id,
+    c.name AS customer_name,
+    w.warehouse_name,
+    r.route_name,
+    s.shipment_status,
+    s.shipment_date,
+    s.estimated_delivery,
+    s.actual_delivery
+   FROM ((((public.shipment s
+     JOIN public.orders o ON ((s.order_id = o.order_id)))
+     JOIN public.customer c ON ((o.customer_id = c.customer_id)))
+     JOIN public.warehouse w ON ((s.warehouse_id = w.warehouse_id)))
+     JOIN public.route r ON ((s.route_id = r.route_id)));
+
+
+ALTER VIEW public.shipment_summary OWNER TO postgres;
 
 --
 -- TOC entry 245 (class 1259 OID 16652)
@@ -604,7 +712,7 @@ CREATE SEQUENCE public.shipment_tracking_tracking_id_seq
 ALTER SEQUENCE public.shipment_tracking_tracking_id_seq OWNER TO postgres;
 
 --
--- TOC entry 5246 (class 0 OID 0)
+-- TOC entry 5269 (class 0 OID 0)
 -- Dependencies: 244
 -- Name: shipment_tracking_tracking_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
 --
@@ -647,7 +755,7 @@ CREATE SEQUENCE public.users_user_id_seq
 ALTER SEQUENCE public.users_user_id_seq OWNER TO postgres;
 
 --
--- TOC entry 5247 (class 0 OID 0)
+-- TOC entry 5270 (class 0 OID 0)
 -- Dependencies: 221
 -- Name: users_user_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
 --
@@ -675,6 +783,49 @@ CREATE TABLE public.vehicle (
 ALTER TABLE public.vehicle OWNER TO postgres;
 
 --
+-- TOC entry 254 (class 1259 OID 16767)
+-- Name: vehicle_maintenance; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE public.vehicle_maintenance (
+    maintenance_id integer NOT NULL,
+    vehicle_id integer NOT NULL,
+    maintenance_date date NOT NULL,
+    maintenance_type character varying(50) NOT NULL,
+    cost numeric(10,2) NOT NULL,
+    description character varying(255),
+    CONSTRAINT chk_maintenance_cost CHECK ((cost >= (0)::numeric))
+);
+
+
+ALTER TABLE public.vehicle_maintenance OWNER TO postgres;
+
+--
+-- TOC entry 253 (class 1259 OID 16766)
+-- Name: vehicle_maintenance_maintenance_id_seq; Type: SEQUENCE; Schema: public; Owner: postgres
+--
+
+CREATE SEQUENCE public.vehicle_maintenance_maintenance_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE public.vehicle_maintenance_maintenance_id_seq OWNER TO postgres;
+
+--
+-- TOC entry 5271 (class 0 OID 0)
+-- Dependencies: 253
+-- Name: vehicle_maintenance_maintenance_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
+--
+
+ALTER SEQUENCE public.vehicle_maintenance_maintenance_id_seq OWNED BY public.vehicle_maintenance.maintenance_id;
+
+
+--
 -- TOC entry 228 (class 1259 OID 16475)
 -- Name: vehicle_vehicle_id_seq; Type: SEQUENCE; Schema: public; Owner: postgres
 --
@@ -691,32 +842,13 @@ CREATE SEQUENCE public.vehicle_vehicle_id_seq
 ALTER SEQUENCE public.vehicle_vehicle_id_seq OWNER TO postgres;
 
 --
--- TOC entry 5248 (class 0 OID 0)
+-- TOC entry 5272 (class 0 OID 0)
 -- Dependencies: 228
 -- Name: vehicle_vehicle_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
 --
 
 ALTER SEQUENCE public.vehicle_vehicle_id_seq OWNED BY public.vehicle.vehicle_id;
 
-
---
--- TOC entry 233 (class 1259 OID 16513)
--- Name: warehouse; Type: TABLE; Schema: public; Owner: postgres
---
-
-CREATE TABLE public.warehouse (
-    warehouse_id integer NOT NULL,
-    warehouse_name character varying(100) NOT NULL,
-    address character varying(255) NOT NULL,
-    city character varying(50) NOT NULL,
-    capacity numeric(12,2),
-    manager_employee_id integer,
-    status character varying(30) DEFAULT 'ACTIVE'::character varying,
-    CONSTRAINT chk_warehouse_capacity CHECK (((capacity IS NULL) OR (capacity > (0)::numeric)))
-);
-
-
-ALTER TABLE public.warehouse OWNER TO postgres;
 
 --
 -- TOC entry 232 (class 1259 OID 16512)
@@ -735,7 +867,7 @@ CREATE SEQUENCE public.warehouse_warehouse_id_seq
 ALTER SEQUENCE public.warehouse_warehouse_id_seq OWNER TO postgres;
 
 --
--- TOC entry 5249 (class 0 OID 0)
+-- TOC entry 5273 (class 0 OID 0)
 -- Dependencies: 232
 -- Name: warehouse_warehouse_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
 --
@@ -744,7 +876,7 @@ ALTER SEQUENCE public.warehouse_warehouse_id_seq OWNED BY public.warehouse.wareh
 
 
 --
--- TOC entry 4946 (class 2604 OID 16427)
+-- TOC entry 4958 (class 2604 OID 16427)
 -- Name: customer customer_id; Type: DEFAULT; Schema: public; Owner: postgres
 --
 
@@ -752,7 +884,7 @@ ALTER TABLE ONLY public.customer ALTER COLUMN customer_id SET DEFAULT nextval('p
 
 
 --
--- TOC entry 4970 (class 2604 OID 16671)
+-- TOC entry 4982 (class 2604 OID 16671)
 -- Name: delivery delivery_id; Type: DEFAULT; Schema: public; Owner: postgres
 --
 
@@ -760,7 +892,7 @@ ALTER TABLE ONLY public.delivery ALTER COLUMN delivery_id SET DEFAULT nextval('p
 
 
 --
--- TOC entry 4953 (class 2604 OID 16494)
+-- TOC entry 4965 (class 2604 OID 16494)
 -- Name: driver_vehicle_assignment assignment_id; Type: DEFAULT; Schema: public; Owner: postgres
 --
 
@@ -768,7 +900,7 @@ ALTER TABLE ONLY public.driver_vehicle_assignment ALTER COLUMN assignment_id SET
 
 
 --
--- TOC entry 4948 (class 2604 OID 16445)
+-- TOC entry 4960 (class 2604 OID 16445)
 -- Name: employee employee_id; Type: DEFAULT; Schema: public; Owner: postgres
 --
 
@@ -776,7 +908,7 @@ ALTER TABLE ONLY public.employee ALTER COLUMN employee_id SET DEFAULT nextval('p
 
 
 --
--- TOC entry 4975 (class 2604 OID 16722)
+-- TOC entry 4987 (class 2604 OID 16722)
 -- Name: invoice invoice_id; Type: DEFAULT; Schema: public; Owner: postgres
 --
 
@@ -784,7 +916,7 @@ ALTER TABLE ONLY public.invoice ALTER COLUMN invoice_id SET DEFAULT nextval('pub
 
 
 --
--- TOC entry 4960 (class 2604 OID 16570)
+-- TOC entry 4972 (class 2604 OID 16570)
 -- Name: orders order_id; Type: DEFAULT; Schema: public; Owner: postgres
 --
 
@@ -792,7 +924,7 @@ ALTER TABLE ONLY public.orders ALTER COLUMN order_id SET DEFAULT nextval('public
 
 
 --
--- TOC entry 4972 (class 2604 OID 16697)
+-- TOC entry 4984 (class 2604 OID 16697)
 -- Name: payment payment_id; Type: DEFAULT; Schema: public; Owner: postgres
 --
 
@@ -800,7 +932,7 @@ ALTER TABLE ONLY public.payment ALTER COLUMN payment_id SET DEFAULT nextval('pub
 
 
 --
--- TOC entry 4956 (class 2604 OID 16534)
+-- TOC entry 4968 (class 2604 OID 16534)
 -- Name: product product_id; Type: DEFAULT; Schema: public; Owner: postgres
 --
 
@@ -808,7 +940,7 @@ ALTER TABLE ONLY public.product ALTER COLUMN product_id SET DEFAULT nextval('pub
 
 
 --
--- TOC entry 4942 (class 2604 OID 16393)
+-- TOC entry 4954 (class 2604 OID 16393)
 -- Name: role role_id; Type: DEFAULT; Schema: public; Owner: postgres
 --
 
@@ -816,7 +948,7 @@ ALTER TABLE ONLY public.role ALTER COLUMN role_id SET DEFAULT nextval('public.ro
 
 
 --
--- TOC entry 4963 (class 2604 OID 16610)
+-- TOC entry 4975 (class 2604 OID 16610)
 -- Name: route route_id; Type: DEFAULT; Schema: public; Owner: postgres
 --
 
@@ -824,7 +956,7 @@ ALTER TABLE ONLY public.route ALTER COLUMN route_id SET DEFAULT nextval('public.
 
 
 --
--- TOC entry 4965 (class 2604 OID 16624)
+-- TOC entry 4977 (class 2604 OID 16624)
 -- Name: shipment shipment_id; Type: DEFAULT; Schema: public; Owner: postgres
 --
 
@@ -832,7 +964,7 @@ ALTER TABLE ONLY public.shipment ALTER COLUMN shipment_id SET DEFAULT nextval('p
 
 
 --
--- TOC entry 4968 (class 2604 OID 16655)
+-- TOC entry 4980 (class 2604 OID 16655)
 -- Name: shipment_tracking tracking_id; Type: DEFAULT; Schema: public; Owner: postgres
 --
 
@@ -840,7 +972,7 @@ ALTER TABLE ONLY public.shipment_tracking ALTER COLUMN tracking_id SET DEFAULT n
 
 
 --
--- TOC entry 4943 (class 2604 OID 16404)
+-- TOC entry 4955 (class 2604 OID 16404)
 -- Name: users user_id; Type: DEFAULT; Schema: public; Owner: postgres
 --
 
@@ -848,7 +980,7 @@ ALTER TABLE ONLY public.users ALTER COLUMN user_id SET DEFAULT nextval('public.u
 
 
 --
--- TOC entry 4951 (class 2604 OID 16479)
+-- TOC entry 4963 (class 2604 OID 16479)
 -- Name: vehicle vehicle_id; Type: DEFAULT; Schema: public; Owner: postgres
 --
 
@@ -856,7 +988,15 @@ ALTER TABLE ONLY public.vehicle ALTER COLUMN vehicle_id SET DEFAULT nextval('pub
 
 
 --
--- TOC entry 4954 (class 2604 OID 16516)
+-- TOC entry 4991 (class 2604 OID 16770)
+-- Name: vehicle_maintenance maintenance_id; Type: DEFAULT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.vehicle_maintenance ALTER COLUMN maintenance_id SET DEFAULT nextval('public.vehicle_maintenance_maintenance_id_seq'::regclass);
+
+
+--
+-- TOC entry 4966 (class 2604 OID 16516)
 -- Name: warehouse warehouse_id; Type: DEFAULT; Schema: public; Owner: postgres
 --
 
@@ -864,7 +1004,7 @@ ALTER TABLE ONLY public.warehouse ALTER COLUMN warehouse_id SET DEFAULT nextval(
 
 
 --
--- TOC entry 5012 (class 2606 OID 16433)
+-- TOC entry 5026 (class 2606 OID 16433)
 -- Name: customer customer_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -873,7 +1013,7 @@ ALTER TABLE ONLY public.customer
 
 
 --
--- TOC entry 5014 (class 2606 OID 16435)
+-- TOC entry 5028 (class 2606 OID 16435)
 -- Name: customer customer_user_id_key; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -882,7 +1022,7 @@ ALTER TABLE ONLY public.customer
 
 
 --
--- TOC entry 5046 (class 2606 OID 16680)
+-- TOC entry 5064 (class 2606 OID 16680)
 -- Name: delivery delivery_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -891,7 +1031,7 @@ ALTER TABLE ONLY public.delivery
 
 
 --
--- TOC entry 5048 (class 2606 OID 16682)
+-- TOC entry 5066 (class 2606 OID 16682)
 -- Name: delivery delivery_shipment_id_key; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -900,7 +1040,7 @@ ALTER TABLE ONLY public.delivery
 
 
 --
--- TOC entry 5020 (class 2606 OID 16469)
+-- TOC entry 5034 (class 2606 OID 16469)
 -- Name: driver driver_license_no_key; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -909,7 +1049,7 @@ ALTER TABLE ONLY public.driver
 
 
 --
--- TOC entry 5022 (class 2606 OID 16467)
+-- TOC entry 5036 (class 2606 OID 16467)
 -- Name: driver driver_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -918,7 +1058,7 @@ ALTER TABLE ONLY public.driver
 
 
 --
--- TOC entry 5028 (class 2606 OID 16501)
+-- TOC entry 5042 (class 2606 OID 16501)
 -- Name: driver_vehicle_assignment driver_vehicle_assignment_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -927,7 +1067,7 @@ ALTER TABLE ONLY public.driver_vehicle_assignment
 
 
 --
--- TOC entry 5016 (class 2606 OID 16451)
+-- TOC entry 5030 (class 2606 OID 16451)
 -- Name: employee employee_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -936,7 +1076,7 @@ ALTER TABLE ONLY public.employee
 
 
 --
--- TOC entry 5018 (class 2606 OID 16453)
+-- TOC entry 5032 (class 2606 OID 16453)
 -- Name: employee employee_user_id_key; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -945,7 +1085,7 @@ ALTER TABLE ONLY public.employee
 
 
 --
--- TOC entry 5034 (class 2606 OID 16555)
+-- TOC entry 5049 (class 2606 OID 16555)
 -- Name: inventory inventory_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -954,7 +1094,7 @@ ALTER TABLE ONLY public.inventory
 
 
 --
--- TOC entry 5056 (class 2606 OID 16739)
+-- TOC entry 5074 (class 2606 OID 16739)
 -- Name: invoice invoice_order_id_key; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -963,7 +1103,7 @@ ALTER TABLE ONLY public.invoice
 
 
 --
--- TOC entry 5058 (class 2606 OID 16737)
+-- TOC entry 5076 (class 2606 OID 16737)
 -- Name: invoice invoice_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -972,7 +1112,7 @@ ALTER TABLE ONLY public.invoice
 
 
 --
--- TOC entry 5038 (class 2606 OID 16595)
+-- TOC entry 5054 (class 2606 OID 16595)
 -- Name: order_item order_item_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -981,7 +1121,7 @@ ALTER TABLE ONLY public.order_item
 
 
 --
--- TOC entry 5036 (class 2606 OID 16579)
+-- TOC entry 5052 (class 2606 OID 16579)
 -- Name: orders orders_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -990,7 +1130,7 @@ ALTER TABLE ONLY public.orders
 
 
 --
--- TOC entry 5050 (class 2606 OID 16710)
+-- TOC entry 5068 (class 2606 OID 16710)
 -- Name: payment payment_order_id_key; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -999,7 +1139,7 @@ ALTER TABLE ONLY public.payment
 
 
 --
--- TOC entry 5052 (class 2606 OID 16708)
+-- TOC entry 5070 (class 2606 OID 16708)
 -- Name: payment payment_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -1008,7 +1148,7 @@ ALTER TABLE ONLY public.payment
 
 
 --
--- TOC entry 5054 (class 2606 OID 16712)
+-- TOC entry 5072 (class 2606 OID 16712)
 -- Name: payment payment_transaction_reference_key; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -1017,7 +1157,7 @@ ALTER TABLE ONLY public.payment
 
 
 --
--- TOC entry 5032 (class 2606 OID 16541)
+-- TOC entry 5046 (class 2606 OID 16541)
 -- Name: product product_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -1026,7 +1166,7 @@ ALTER TABLE ONLY public.product
 
 
 --
--- TOC entry 5002 (class 2606 OID 16397)
+-- TOC entry 5016 (class 2606 OID 16397)
 -- Name: role role_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -1035,7 +1175,7 @@ ALTER TABLE ONLY public.role
 
 
 --
--- TOC entry 5004 (class 2606 OID 16399)
+-- TOC entry 5018 (class 2606 OID 16399)
 -- Name: role role_role_name_key; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -1044,7 +1184,7 @@ ALTER TABLE ONLY public.role
 
 
 --
--- TOC entry 5040 (class 2606 OID 16619)
+-- TOC entry 5056 (class 2606 OID 16619)
 -- Name: route route_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -1053,7 +1193,7 @@ ALTER TABLE ONLY public.route
 
 
 --
--- TOC entry 5060 (class 2606 OID 16755)
+-- TOC entry 5078 (class 2606 OID 16755)
 -- Name: shipment_item shipment_item_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -1062,7 +1202,7 @@ ALTER TABLE ONLY public.shipment_item
 
 
 --
--- TOC entry 5042 (class 2606 OID 16635)
+-- TOC entry 5059 (class 2606 OID 16635)
 -- Name: shipment shipment_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -1071,7 +1211,7 @@ ALTER TABLE ONLY public.shipment
 
 
 --
--- TOC entry 5044 (class 2606 OID 16661)
+-- TOC entry 5062 (class 2606 OID 16661)
 -- Name: shipment_tracking shipment_tracking_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -1080,7 +1220,7 @@ ALTER TABLE ONLY public.shipment_tracking
 
 
 --
--- TOC entry 5006 (class 2606 OID 16417)
+-- TOC entry 5020 (class 2606 OID 16417)
 -- Name: users users_email_key; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -1089,7 +1229,7 @@ ALTER TABLE ONLY public.users
 
 
 --
--- TOC entry 5008 (class 2606 OID 16413)
+-- TOC entry 5022 (class 2606 OID 16413)
 -- Name: users users_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -1098,7 +1238,7 @@ ALTER TABLE ONLY public.users
 
 
 --
--- TOC entry 5010 (class 2606 OID 16415)
+-- TOC entry 5024 (class 2606 OID 16415)
 -- Name: users users_username_key; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -1107,7 +1247,16 @@ ALTER TABLE ONLY public.users
 
 
 --
--- TOC entry 5024 (class 2606 OID 16487)
+-- TOC entry 5080 (class 2606 OID 16778)
+-- Name: vehicle_maintenance vehicle_maintenance_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.vehicle_maintenance
+    ADD CONSTRAINT vehicle_maintenance_pkey PRIMARY KEY (maintenance_id);
+
+
+--
+-- TOC entry 5038 (class 2606 OID 16487)
 -- Name: vehicle vehicle_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -1116,7 +1265,7 @@ ALTER TABLE ONLY public.vehicle
 
 
 --
--- TOC entry 5026 (class 2606 OID 16489)
+-- TOC entry 5040 (class 2606 OID 16489)
 -- Name: vehicle vehicle_registration_no_key; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -1125,7 +1274,7 @@ ALTER TABLE ONLY public.vehicle
 
 
 --
--- TOC entry 5030 (class 2606 OID 16524)
+-- TOC entry 5044 (class 2606 OID 16524)
 -- Name: warehouse warehouse_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -1134,7 +1283,47 @@ ALTER TABLE ONLY public.warehouse
 
 
 --
--- TOC entry 5065 (class 2606 OID 16502)
+-- TOC entry 5047 (class 1259 OID 16792)
+-- Name: idx_inventory_product; Type: INDEX; Schema: public; Owner: postgres
+--
+
+CREATE INDEX idx_inventory_product ON public.inventory USING btree (product_id);
+
+
+--
+-- TOC entry 5050 (class 1259 OID 16789)
+-- Name: idx_orders_customer; Type: INDEX; Schema: public; Owner: postgres
+--
+
+CREATE INDEX idx_orders_customer ON public.orders USING btree (customer_id);
+
+
+--
+-- TOC entry 5057 (class 1259 OID 16790)
+-- Name: idx_shipment_status; Type: INDEX; Schema: public; Owner: postgres
+--
+
+CREATE INDEX idx_shipment_status ON public.shipment USING btree (shipment_status);
+
+
+--
+-- TOC entry 5060 (class 1259 OID 16791)
+-- Name: idx_tracking_shipment; Type: INDEX; Schema: public; Owner: postgres
+--
+
+CREATE INDEX idx_tracking_shipment ON public.shipment_tracking USING btree (shipment_id);
+
+
+--
+-- TOC entry 5104 (class 2620 OID 16794)
+-- Name: shipment_tracking trg_update_shipment_status; Type: TRIGGER; Schema: public; Owner: postgres
+--
+
+CREATE TRIGGER trg_update_shipment_status AFTER INSERT ON public.shipment_tracking FOR EACH ROW EXECUTE FUNCTION public.update_shipment_status();
+
+
+--
+-- TOC entry 5085 (class 2606 OID 16502)
 -- Name: driver_vehicle_assignment fk_assignment_driver; Type: FK CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -1143,7 +1332,7 @@ ALTER TABLE ONLY public.driver_vehicle_assignment
 
 
 --
--- TOC entry 5066 (class 2606 OID 16507)
+-- TOC entry 5086 (class 2606 OID 16507)
 -- Name: driver_vehicle_assignment fk_assignment_vehicle; Type: FK CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -1152,7 +1341,7 @@ ALTER TABLE ONLY public.driver_vehicle_assignment
 
 
 --
--- TOC entry 5062 (class 2606 OID 16436)
+-- TOC entry 5082 (class 2606 OID 16436)
 -- Name: customer fk_customer_user; Type: FK CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -1161,7 +1350,7 @@ ALTER TABLE ONLY public.customer
 
 
 --
--- TOC entry 5077 (class 2606 OID 16688)
+-- TOC entry 5097 (class 2606 OID 16688)
 -- Name: delivery fk_delivery_driver; Type: FK CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -1170,7 +1359,7 @@ ALTER TABLE ONLY public.delivery
 
 
 --
--- TOC entry 5078 (class 2606 OID 16683)
+-- TOC entry 5098 (class 2606 OID 16683)
 -- Name: delivery fk_delivery_shipment; Type: FK CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -1179,7 +1368,7 @@ ALTER TABLE ONLY public.delivery
 
 
 --
--- TOC entry 5064 (class 2606 OID 16470)
+-- TOC entry 5084 (class 2606 OID 16470)
 -- Name: driver fk_driver_employee; Type: FK CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -1188,7 +1377,7 @@ ALTER TABLE ONLY public.driver
 
 
 --
--- TOC entry 5063 (class 2606 OID 16454)
+-- TOC entry 5083 (class 2606 OID 16454)
 -- Name: employee fk_employee_user; Type: FK CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -1197,7 +1386,7 @@ ALTER TABLE ONLY public.employee
 
 
 --
--- TOC entry 5068 (class 2606 OID 16561)
+-- TOC entry 5088 (class 2606 OID 16561)
 -- Name: inventory fk_inventory_product; Type: FK CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -1206,7 +1395,7 @@ ALTER TABLE ONLY public.inventory
 
 
 --
--- TOC entry 5069 (class 2606 OID 16556)
+-- TOC entry 5089 (class 2606 OID 16556)
 -- Name: inventory fk_inventory_warehouse; Type: FK CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -1215,7 +1404,7 @@ ALTER TABLE ONLY public.inventory
 
 
 --
--- TOC entry 5080 (class 2606 OID 16740)
+-- TOC entry 5100 (class 2606 OID 16740)
 -- Name: invoice fk_invoice_order; Type: FK CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -1224,7 +1413,16 @@ ALTER TABLE ONLY public.invoice
 
 
 --
--- TOC entry 5070 (class 2606 OID 16580)
+-- TOC entry 5103 (class 2606 OID 16779)
+-- Name: vehicle_maintenance fk_maintenance_vehicle; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.vehicle_maintenance
+    ADD CONSTRAINT fk_maintenance_vehicle FOREIGN KEY (vehicle_id) REFERENCES public.vehicle(vehicle_id);
+
+
+--
+-- TOC entry 5090 (class 2606 OID 16580)
 -- Name: orders fk_order_customer; Type: FK CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -1233,7 +1431,7 @@ ALTER TABLE ONLY public.orders
 
 
 --
--- TOC entry 5071 (class 2606 OID 16596)
+-- TOC entry 5091 (class 2606 OID 16596)
 -- Name: order_item fk_order_item_order; Type: FK CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -1242,7 +1440,7 @@ ALTER TABLE ONLY public.order_item
 
 
 --
--- TOC entry 5072 (class 2606 OID 16601)
+-- TOC entry 5092 (class 2606 OID 16601)
 -- Name: order_item fk_order_item_product; Type: FK CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -1251,7 +1449,7 @@ ALTER TABLE ONLY public.order_item
 
 
 --
--- TOC entry 5079 (class 2606 OID 16713)
+-- TOC entry 5099 (class 2606 OID 16713)
 -- Name: payment fk_payment_order; Type: FK CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -1260,7 +1458,7 @@ ALTER TABLE ONLY public.payment
 
 
 --
--- TOC entry 5081 (class 2606 OID 16761)
+-- TOC entry 5101 (class 2606 OID 16761)
 -- Name: shipment_item fk_shipment_item_order_item; Type: FK CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -1269,7 +1467,7 @@ ALTER TABLE ONLY public.shipment_item
 
 
 --
--- TOC entry 5082 (class 2606 OID 16756)
+-- TOC entry 5102 (class 2606 OID 16756)
 -- Name: shipment_item fk_shipment_item_shipment; Type: FK CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -1278,7 +1476,7 @@ ALTER TABLE ONLY public.shipment_item
 
 
 --
--- TOC entry 5073 (class 2606 OID 16636)
+-- TOC entry 5093 (class 2606 OID 16636)
 -- Name: shipment fk_shipment_order; Type: FK CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -1287,7 +1485,7 @@ ALTER TABLE ONLY public.shipment
 
 
 --
--- TOC entry 5074 (class 2606 OID 16646)
+-- TOC entry 5094 (class 2606 OID 16646)
 -- Name: shipment fk_shipment_route; Type: FK CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -1296,7 +1494,7 @@ ALTER TABLE ONLY public.shipment
 
 
 --
--- TOC entry 5075 (class 2606 OID 16641)
+-- TOC entry 5095 (class 2606 OID 16641)
 -- Name: shipment fk_shipment_warehouse; Type: FK CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -1305,7 +1503,7 @@ ALTER TABLE ONLY public.shipment
 
 
 --
--- TOC entry 5076 (class 2606 OID 16662)
+-- TOC entry 5096 (class 2606 OID 16662)
 -- Name: shipment_tracking fk_tracking_shipment; Type: FK CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -1314,7 +1512,7 @@ ALTER TABLE ONLY public.shipment_tracking
 
 
 --
--- TOC entry 5061 (class 2606 OID 16418)
+-- TOC entry 5081 (class 2606 OID 16418)
 -- Name: users fk_user_role; Type: FK CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -1323,7 +1521,7 @@ ALTER TABLE ONLY public.users
 
 
 --
--- TOC entry 5067 (class 2606 OID 16525)
+-- TOC entry 5087 (class 2606 OID 16525)
 -- Name: warehouse fk_warehouse_manager; Type: FK CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -1331,11 +1529,11 @@ ALTER TABLE ONLY public.warehouse
     ADD CONSTRAINT fk_warehouse_manager FOREIGN KEY (manager_employee_id) REFERENCES public.employee(employee_id);
 
 
--- Completed on 2026-09-03 22:16:24
+-- Completed on 2026-09-03 22:52:25
 
 --
 -- PostgreSQL database dump complete
 --
 
-\unrestrict pcBSqycYvei27yYu0KA3BR7K4ecBwDnZMbbT7eg93EgcoCnJEKXXjtEy312kQko
+\unrestrict 2QTyQpUTrPtQi1vft4e7rAFc7ga3JI0Jw8GZjg4oSgNYyIX214HqsyWnhk9hmJO
 
