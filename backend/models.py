@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, TIMESTAMP, ForeignKey, Date, Numeric, PrimaryKeyConstraint, Interval, ForeignKeyConstraint
+from sqlalchemy import Column, Integer, String, Boolean, TIMESTAMP, ForeignKey, Date, Numeric, PrimaryKeyConstraint, Interval, ForeignKeyConstraint, text
 from sqlalchemy.orm import declarative_base
 
 Base = declarative_base()
@@ -263,7 +263,7 @@ class ShipmentTracking(Base):
 
     status = Column(String(50), nullable=False)
     location = Column(String(150))
-    tracking_timestamp = Column(TIMESTAMP)
+    tracking_timestamp = Column(TIMESTAMP, server_default=text("CURRENT_TIMESTAMP"))
     remarks = Column(String(255))
 
 class Delivery(Base):
