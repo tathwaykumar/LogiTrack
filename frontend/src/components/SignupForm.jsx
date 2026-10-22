@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { Icon, Notice } from './ui.jsx'
 
 const initialForm = { name: '', username: '', email: '', phone: '', address: '', password: '', confirmPassword: '' }
 
@@ -26,20 +27,24 @@ function SignupForm({ onSubmit, isLoading, error }) {
 
   const message = validationError || error
   return <form className="mt-8 space-y-4" onSubmit={submit}>
-    {message && <div role="alert" className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm leading-6 text-red-700">{message}</div>}
+    {message && <Notice tone="error">{message}</Notice>}
     <Field label="Full name" name="name" value={form.name} onChange={updateField} maxLength={100} disabled={isLoading} autoComplete="name" />
-    <Field label="Username" name="username" value={form.username} onChange={updateField} minLength={3} maxLength={50} disabled={isLoading} autoComplete="username" />
+    <div className="grid gap-4 sm:grid-cols-2">
+      <Field label="Username" name="username" value={form.username} onChange={updateField} minLength={3} maxLength={50} disabled={isLoading} autoComplete="username" />
+      <Field label="Phone number" name="phone" type="tel" value={form.phone} onChange={updateField} minLength={7} maxLength={20} disabled={isLoading} autoComplete="tel" />
+    </div>
     <Field label="Email" name="email" type="email" value={form.email} onChange={updateField} maxLength={100} disabled={isLoading} autoComplete="email" />
-    <Field label="Phone number" name="phone" type="tel" value={form.phone} onChange={updateField} minLength={7} maxLength={20} disabled={isLoading} autoComplete="tel" />
     <Field label="Address" name="address" value={form.address} onChange={updateField} maxLength={255} disabled={isLoading} autoComplete="street-address" />
-    <Field label="Password" name="password" type="password" value={form.password} onChange={updateField} minLength={8} maxLength={128} disabled={isLoading} autoComplete="new-password" />
-    <Field label="Confirm password" name="confirmPassword" type="password" value={form.confirmPassword} onChange={updateField} minLength={8} maxLength={128} disabled={isLoading} autoComplete="new-password" />
-    <button className="flex w-full items-center justify-center gap-2 rounded-xl bg-slate-900 px-4 py-3 font-semibold text-white shadow-sm transition hover:bg-slate-800 focus:outline-none focus:ring-4 focus:ring-slate-300 disabled:cursor-wait disabled:opacity-70" disabled={isLoading} type="submit">{isLoading && <span aria-hidden="true" className="size-4 animate-spin rounded-full border-2 border-white/40 border-t-white" />}{isLoading ? 'Creating account...' : 'Create account'}</button>
+    <div className="grid gap-4 sm:grid-cols-2">
+      <Field label="Password" name="password" type="password" value={form.password} onChange={updateField} minLength={8} maxLength={128} disabled={isLoading} autoComplete="new-password" />
+      <Field label="Confirm password" name="confirmPassword" type="password" value={form.confirmPassword} onChange={updateField} minLength={8} maxLength={128} disabled={isLoading} autoComplete="new-password" />
+    </div>
+    <button className="btn btn-ink mt-2 w-full justify-between! px-6! py-3.5! text-base!" disabled={isLoading} type="submit"><span className="inline-flex items-center gap-2">{isLoading && <span aria-hidden="true" className="size-4 animate-spin rounded-full border-2 border-paper/40 border-t-paper" />}{isLoading ? 'Creating account…' : 'Create account'}</span><Icon name="arrowRight" className="size-5" /></button>
   </form>
 }
 
 function Field({ label, name, type = 'text', value, onChange, ...props }) {
-  return <label className="block"><span className="mb-2 block text-sm font-medium text-slate-800">{label} <span className="text-rose-600">*</span></span><input className="w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-slate-950 outline-none transition placeholder:text-slate-400 focus:border-cyan-600 focus:ring-4 focus:ring-cyan-100" name={name} onChange={onChange} required type={type} value={value} {...props} /></label>
+  return <label className="block"><span className="field-label">{label} <span className="text-bad" aria-hidden="true">*</span></span><input className="field py-3!" name={name} onChange={onChange} required type={type} value={value} {...props} /></label>
 }
 
 export default SignupForm

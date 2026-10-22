@@ -1,8 +1,11 @@
-
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { ApiError, apiGet, apiPost } from '../services/apiClient.js'
+import { formatDate, formatDateTime, formatLabel } from '../lib/format.js'
+import { nextShipmentStatuses } from '../lib/status.js'
+import { EmptyState, ErrorState, Icon, Notice, PageHeader, Panel, RefreshButton, SearchField } from './ui.jsx'
 
-const TRACKING_STATUSES = ['CREATED', 'PICKED_UP', 'IN_TRANSIT', 'OUT_FOR_DELIVERY', 'DELIVERED', 'CANCELLED']
+const PROGRESS_STAGES = ['CREATED', 'PICKED_UP', 'IN_TRANSIT', 'OUT_FOR_DELIVERY', 'DELIVERED']
+const STAGE_ICONS = { CREATED: 'box', PICKED_UP: 'warehouse', IN_TRANSIT: 'route', OUT_FOR_DELIVERY: 'truck', DELIVERED: 'check' }
 
 function Tracking({ session, onAuthExpired }) {
   const [shipments, setShipments] = useState([])
@@ -19,6 +22,7 @@ function Tracking({ session, onAuthExpired }) {
   const [updating, setUpdating] = useState(false)
   const [updateError, setUpdateError] = useState('')
   const [updateSuccess, setUpdateSuccess] = useState('')
+  const [search, setSearch] = useState('')
   const canUpdateTracking = [1, 2, 3].includes(Number(session.user.roleId))
 
   const loadShipments = useCallback(async () => {
@@ -72,15 +76,13 @@ function Tracking({ session, onAuthExpired }) {
       setEvents([])
 
       try {
-        const data = await apiGet(
-          `/shipments/${selectedId}/timeline`,
-          session.accessToken
-        )
+        const data = await apiGet(`/shipments/${selectedId}/timeline`, session.accessToken)
 
         if (active) {
+          // The API returns { ..., tracking_events: [...] }.
           const timeline = Array.isArray(data)
             ? data
-            : data.timeline ?? data.tracking ?? data.events ?? []
+            : data.tracking_events ?? data.timeline ?? data.tracking ?? data.events ?? []
 
           if (!Array.isArray(timeline)) {
             throw new Error('Unexpected tracking timeline response.')
@@ -96,9 +98,7 @@ function Tracking({ session, onAuthExpired }) {
           return
         }
 
-        setTimelineError(
-          err.message || 'Unable to load this shipment timeline.'
-        )
+        setTimelineError(err.message || 'Unable to load this shipment timeline.')
       } finally {
         if (active) setLoadingTimeline(false)
       }
@@ -111,9 +111,22 @@ function Tracking({ session, onAuthExpired }) {
     }
   }, [selectedId, session.accessToken, onAuthExpired])
 
-  const selectedShipment = shipments.find(
-    (item) => String(item.shipment_id) === selectedId
-  )
+  const selectedShipment = shipments.find((item) => String(item.shipment_id) === selectedId)
+  const filteredShipments = useMemo(() => {
+    const query = search.trim().toLowerCase()
+    if (!query) return shipments
+    return shipments.filter((item) => [item.shipment_id, item.order_id, item.shipment_status].some((value) => String(value ?? '').toLowerCase().includes(query)))
+  }, [shipments, search])
+  // Newest first in insertion order: the order in which the database applied each event's
+  // status, so the "Latest" event always matches the shipment's current status.
+  const orderedEvents = useMemo(() => [...events].sort((a, b) => (Number(b.tracking_id) || 0) - (Number(a.tracking_id) || 0)), [events])
+  const statusOptions = nextShipmentStatuses(selectedShipment?.shipment_status)
+
+  function selectShipment(id) {
+    setSelectedId(id)
+    setUpdateError('')
+    setUpdateSuccess('')
+  }
 
   async function submitTrackingUpdate(event) {
     event.preventDefault()
@@ -125,7 +138,7 @@ function Tracking({ session, onAuthExpired }) {
     try {
       const data = await apiPost('/tracking', {
         shipment_id: Number(selectedId),
-        status,
+        status: statusOptions.includes(status) ? status : statusOptions[0],
         location: location.trim() || null,
         remarks: remarks.trim() || null,
       }, session.accessToken)
@@ -152,232 +165,178 @@ function Tracking({ session, onAuthExpired }) {
   }
 
   return (
-    <div className="mx-auto max-w-7xl space-y-6">
-      <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
-        <div>
-          <p className="text-sm font-semibold uppercase tracking-[0.16em] text-cyan-700">
-            Shipment visibility
-          </p>
-          <h2 className="mt-2 text-3xl font-semibold tracking-tight text-slate-950">
-            Tracking
-          </h2>
-          <p className="mt-2 text-slate-600">
-            Follow shipment status, locations and tracking history.
-          </p>
-        </div>
+    <div className="space-y-8">
+      <PageHeader
+        eyebrow="Shipment visibility"
+        title="Every milestone,"
+        accent="in order."
+        description="Follow a shipment from warehouse to doorstep with its full tracking history."
+        actions={<RefreshButton onClick={() => setRefreshKey((key) => key + 1)} loading={loadingShipments} label="Refresh tracking" />}
+      />
 
-        <button
-          onClick={() => setRefreshKey((key) => key + 1)}
-          disabled={loadingShipments}
-          className="rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:opacity-50"
-        >
-          {loadingShipments ? 'Refreshing...' : 'Refresh tracking'}
-        </button>
-      </div>
-
-      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
-        <label
-          htmlFor="tracking-shipment"
-          className="block text-sm font-semibold text-slate-800"
-        >
-          Select shipment
-        </label>
-
-        {loadingShipments ? (
-          <div className="mt-3 h-11 animate-pulse rounded-lg bg-slate-100" />
-        ) : error ? (
-          <div className="mt-4 rounded-xl bg-red-50 p-4">
-            <p className="text-sm text-red-700">{error}</p>
-            <button
-              onClick={() => setRefreshKey((key) => key + 1)}
-              className="mt-3 text-sm font-semibold text-red-800 underline"
-            >
-              Try again
-            </button>
+      <div className="grid gap-6 xl:grid-cols-[22rem_minmax(0,1fr)]">
+        <Panel eyebrow="Shipments" title={loadingShipments ? 'Loading…' : `${shipments.length} on record`} bodyClassName="p-0" className="xl:sticky xl:top-24 xl:self-start">
+          <div className="border-b border-line p-4">
+            <SearchField value={search} onChange={setSearch} placeholder="Shipment, order or status" label="Search shipments" />
           </div>
-        ) : shipments.length === 0 ? (
-          <div className="mt-4 rounded-xl bg-slate-50 px-4 py-8 text-center">
-            <p className="font-semibold text-slate-900">
-              No shipments available
-            </p>
-            <p className="mt-2 text-sm text-slate-500">
-              Tracking history will appear here when you have a shipment.
-            </p>
-          </div>
-        ) : (
-          <select
-            id="tracking-shipment"
-            value={selectedId}
-            onChange={(event) => setSelectedId(event.target.value)}
-            className="mt-3 w-full rounded-lg border border-slate-300 bg-white px-3 py-3 text-sm outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100 sm:max-w-md"
-          >
-            {shipments.map((shipment) => (
-              <option
-                key={shipment.shipment_id}
-                value={String(shipment.shipment_id)}
-              >
-                Shipment #{shipment.shipment_id} — {shipment.shipment_status ?? 'Unknown status'}
-              </option>
-            ))}
-          </select>
-        )}
-      </section>
+          {loadingShipments ? (
+            <div className="space-y-2 p-4">{[1, 2, 3, 4].map((item) => <div key={item} className="skeleton h-16" />)}</div>
+          ) : error ? (
+            <ErrorState title="Shipments unavailable" message={error} onRetry={() => setRefreshKey((key) => key + 1)} />
+          ) : shipments.length === 0 ? (
+            <EmptyState icon="route" title="No shipments yet" text="Tracking history will appear here when you have a shipment." />
+          ) : (
+            <ul className="scrollbar-thin max-h-[32rem] space-y-1 overflow-y-auto p-2" aria-label="Select shipment">
+              {filteredShipments.map((shipment) => {
+                const active = String(shipment.shipment_id) === selectedId
+                return (
+                  <li key={shipment.shipment_id}>
+                    <button
+                      type="button"
+                      aria-pressed={active}
+                      onClick={() => selectShipment(String(shipment.shipment_id))}
+                      className={`flex w-full items-center gap-3 rounded-2xl px-3 py-3 text-left transition-colors ${active ? 'bg-ink text-paper' : 'hover:bg-cream'}`}
+                    >
+                      <span className={`grid size-10 shrink-0 place-items-center rounded-full ${active ? 'bg-lime text-ink' : 'bg-cream text-ink'}`}>
+                        <Icon name={STAGE_ICONS[shipment.shipment_status] ?? 'box'} className="size-4" />
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block font-semibold">Shipment #{shipment.shipment_id}</span>
+                        <span className={`block truncate text-xs ${active ? 'text-paper/60' : 'text-stone'}`}>Order #{shipment.order_id ?? '—'} · {formatLabel(shipment.shipment_status, 'Unknown status')}</span>
+                      </span>
+                      {active && <Icon name="arrowRight" className="size-4 text-lime" />}
+                    </button>
+                  </li>
+                )
+              })}
+              {filteredShipments.length === 0 && <li className="px-3 py-8 text-center text-sm text-stone">No shipment matches “{search}”.</li>}
+            </ul>
+          )}
+        </Panel>
 
-      {selectedShipment && (
-        <div className="grid gap-4 sm:grid-cols-3">
-          <SummaryCard
-            label="Shipment ID"
-            value={`#${selectedShipment.shipment_id}`}
-          />
-          <SummaryCard
-            label="Order ID"
-            value={selectedShipment.order_id ?? '—'}
-          />
-          <SummaryCard
-            label="Current status"
-            value={formatLabel(selectedShipment.shipment_status)}
-          />
-        </div>
-      )}
+        <div className="min-w-0 space-y-6">
+          {selectedShipment ? (
+            <ShipmentHero shipment={selectedShipment} />
+          ) : !loadingShipments && !error && shipments.length > 0 ? (
+            <div className="panel"><EmptyState icon="pin" title="Select a shipment" text="Choose a shipment to see its progress." /></div>
+          ) : null}
 
-      {selectedShipment && canUpdateTracking && (
-        <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
-          <div>
-            <h3 className="font-semibold text-slate-950">Update tracking status</h3>
-            <p className="mt-1 text-sm text-slate-500">Record the latest status for shipment #{selectedShipment.shipment_id}.</p>
-          </div>
-          {updateError && <div role="alert" className="mt-4 rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700">{updateError}</div>}
-          {updateSuccess && <div role="status" className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-700">{updateSuccess}</div>}
-          <form onSubmit={submitTrackingUpdate} className="mt-5 grid gap-4 sm:grid-cols-2">
-            <label className="block text-sm font-medium text-slate-700">Status<select value={status} onChange={(event) => setStatus(event.target.value)} className="mt-2 block w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-900 outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100">{TRACKING_STATUSES.map((value) => <option key={value} value={value}>{formatLabel(value)}</option>)}</select></label>
-            <label className="block text-sm font-medium text-slate-700">Location<input value={location} onChange={(event) => setLocation(event.target.value)} maxLength={150} placeholder="Current location" className="mt-2 block w-full rounded-xl border border-slate-300 px-3 py-2.5 text-sm text-slate-900 outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100" /></label>
-            <label className="block text-sm font-medium text-slate-700 sm:col-span-2">Remarks<textarea value={remarks} onChange={(event) => setRemarks(event.target.value)} maxLength={255} rows="3" placeholder="Optional update details" className="mt-2 block w-full resize-y rounded-xl border border-slate-300 px-3 py-2.5 text-sm text-slate-900 outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100" /></label>
-            <div className="sm:col-span-2"><button type="submit" disabled={updating} className="rounded-lg bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60">{updating ? 'Saving update...' : 'Save tracking update'}</button></div>
-          </form>
-        </section>
-      )}
+          {selectedShipment && (
+            <div className="grid gap-6 2xl:grid-cols-[minmax(0,1fr)_22rem]">
+              <Panel eyebrow="History" title="Tracking timeline" subtitle="Most recent event first">
+                {loadingTimeline ? (
+                  <div className="space-y-4">{[1, 2, 3].map((item) => <div key={item} className="skeleton h-20" />)}</div>
+                ) : timelineError ? (
+                  <ErrorState title="Unable to load tracking history" message={timelineError} onRetry={() => setRefreshKey((key) => key + 1)} />
+                ) : orderedEvents.length === 0 ? (
+                  <EmptyState icon="clock" title="No events yet" text="No tracking events have been recorded for this shipment yet." />
+                ) : (
+                  <ol className="relative">
+                    {orderedEvents.map((event, index) => (
+                      <li key={event.tracking_id ?? event.id ?? index} className="relative flex gap-4 pb-6 last:pb-0">
+                        {index !== orderedEvents.length - 1 && <span className="absolute top-10 bottom-0 left-5 w-px bg-line" aria-hidden="true" />}
+                        <span className={`relative z-10 grid size-10 shrink-0 place-items-center rounded-full ${index === 0 ? 'bg-lime text-ink ring-4 ring-lime/30' : 'bg-cream text-graphite'}`}>
+                          <Icon name={STAGE_ICONS[event.status] ?? (event.status === 'CANCELLED' ? 'x' : 'pin')} className="size-4" />
+                        </span>
+                        <div className={`min-w-0 flex-1 rounded-2xl border p-4 ${index === 0 ? 'border-ink bg-paper' : 'border-line bg-ivory/50'}`}>
+                          <div className="flex flex-col justify-between gap-2 sm:flex-row sm:items-start">
+                            <div>
+                              <div className="flex flex-wrap items-center gap-2">
+                                <p className="font-display text-lg font-semibold">{formatLabel(event.status ?? event.tracking_status, 'Update')}</p>
+                                {index === 0 && <span className="eyebrow rounded-full bg-ink px-2 py-0.5 text-lime">Latest</span>}
+                              </div>
+                              <p className="mt-1 flex items-center gap-1.5 text-sm text-stone"><Icon name="pin" className="size-3.5" />{event.location || 'Location not recorded'}</p>
+                            </div>
+                            <time className="eyebrow shrink-0 text-mist">{formatDateTime(eventTime(event))}</time>
+                          </div>
+                          {(event.remarks || event.description) && <p className="mt-3 border-t border-line pt-3 text-sm leading-6 text-graphite">{event.remarks || event.description}</p>}
+                        </div>
+                      </li>
+                    ))}
+                  </ol>
+                )}
+              </Panel>
 
-      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
-        <div>
-          <h3 className="font-semibold text-slate-950">Tracking timeline</h3>
-          <p className="mt-1 text-sm text-slate-500">
-            Recorded events for the selected shipment.
-          </p>
-        </div>
-
-        {loadingTimeline ? (
-          <div className="mt-6 space-y-4">
-            {[1, 2, 3].map((item) => (
-              <div
-                key={item}
-                className="h-16 animate-pulse rounded-lg bg-slate-100"
-              />
-            ))}
-          </div>
-        ) : timelineError ? (
-          <div className="mt-5 rounded-xl border border-red-200 bg-red-50 p-4">
-            <p className="font-semibold text-red-800">
-              Unable to load tracking history
-            </p>
-            <p className="mt-1 text-sm text-red-700">{timelineError}</p>
-            <button
-              onClick={() => setRefreshKey((key) => key + 1)}
-              className="mt-3 text-sm font-semibold text-red-800 underline"
-            >
-              Reload shipments
-            </button>
-          </div>
-        ) : !selectedId ? (
-          <EmptyState text="Select a shipment to view its tracking history." />
-        ) : events.length === 0 ? (
-          <EmptyState text="No tracking events have been recorded for this shipment yet." />
-        ) : (
-          <div className="mt-6 space-y-0">
-            {events.map((event, index) => (
-              <div
-                key={event.tracking_id ?? event.id ?? index}
-                className="relative flex gap-4 pb-7 last:pb-0"
-              >
-                <div className="flex flex-col items-center">
-                  <span className="relative z-10 mt-1 size-3 shrink-0 rounded-full border-2 border-cyan-600 bg-white" />
-                  {index !== events.length - 1 && (
-                    <span className="absolute bottom-0 top-4 w-px bg-slate-200" />
-                  )}
-                </div>
-
-                <div className="min-w-0 flex-1 rounded-xl border border-slate-200 p-4">
-                  <div className="flex flex-col justify-between gap-2 sm:flex-row sm:items-start">
-                    <div>
-                      <p className="font-semibold text-slate-900">
-                        {formatLabel(event.status ?? event.tracking_status)}
-                      </p>
-                      <p className="mt-1 text-sm text-slate-600">
-                        {event.location || 'Location not recorded'}
-                      </p>
+              {canUpdateTracking && (
+                <Panel eyebrow="Field update" title="Record a status" subtitle={`For shipment #${selectedShipment.shipment_id}`} className="2xl:sticky 2xl:top-24 2xl:self-start">
+                  {statusOptions.length === 0 ? (
+                    <div className="space-y-4">
+                      {updateSuccess && <Notice tone="success">{updateSuccess}</Notice>}
+                      <Notice tone="info">This shipment is {formatLabel(selectedShipment.shipment_status).toLowerCase()} and closed. Its history is kept, but no further tracking updates can be recorded.</Notice>
                     </div>
-                    <time className="shrink-0 text-xs text-slate-500">
-                      {formatDateTime(
-                        event.tracking_time ??
-                        event.tracking_date ??
-                        event.created_at ??
-                        event.timestamp ??
-                        event.updated_at
-                      )}
-                    </time>
-                  </div>
-
-                  {(event.remarks || event.description) && (
-                    <p className="mt-3 text-sm leading-6 text-slate-600">
-                      {event.remarks || event.description}
-                    </p>
+                  ) : (
+                  <form onSubmit={submitTrackingUpdate} className="space-y-4">
+                    {updateError && <Notice tone="error">{updateError}</Notice>}
+                    {updateSuccess && <Notice tone="success">{updateSuccess}</Notice>}
+                    <label className="block"><span className="field-label">Status</span><select value={statusOptions.includes(status) ? status : statusOptions[0]} onChange={(event) => setStatus(event.target.value)} className="field cursor-pointer">{statusOptions.map((value) => <option key={value} value={value}>{formatLabel(value)}{value === selectedShipment.shipment_status ? ' (checkpoint)' : ''}</option>)}</select></label>
+                    <label className="block"><span className="field-label">Location</span><input value={location} onChange={(event) => setLocation(event.target.value)} maxLength={150} placeholder="Current location" className="field" /></label>
+                    <label className="block"><span className="field-label">Remarks</span><textarea value={remarks} onChange={(event) => setRemarks(event.target.value)} maxLength={255} rows="3" placeholder="Optional update details" className="field resize-y" /></label>
+                    <button type="submit" disabled={updating} className="btn btn-ink w-full py-3!">{updating ? 'Saving update…' : 'Save tracking update'}</button>
+                  </form>
                   )}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </section>
+                </Panel>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   )
 }
 
-function SummaryCard({ label, value }) {
+function eventTime(event) {
+  return event.tracking_timestamp ?? event.tracking_time ?? event.tracking_date ?? event.created_at ?? event.timestamp ?? event.updated_at
+}
+
+function ShipmentHero({ shipment }) {
+  const status = String(shipment.shipment_status ?? '').toUpperCase()
+  const cancelled = status === 'CANCELLED'
+  const reached = PROGRESS_STAGES.indexOf(status)
+  const progress = reached < 0 ? 0 : (reached / (PROGRESS_STAGES.length - 1)) * 100
+
   return (
-    <article className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-      <p className="text-sm font-medium text-slate-500">{label}</p>
-      <p className="mt-2 truncate text-xl font-semibold text-slate-950">
-        {value}
-      </p>
-    </article>
+    <section className="on-dark animate-rise relative overflow-hidden rounded-[1.8rem] bg-ink p-6 text-paper sm:p-8">
+      <span className="absolute -top-20 -right-20 size-64 rounded-full border-[24px] border-lime/10" aria-hidden="true" />
+      <div className="relative flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <p className="eyebrow text-lime">Shipment</p>
+          <h2 className="font-display mt-2 text-5xl font-semibold sm:text-6xl">#{shipment.shipment_id}</h2>
+          <p className="mt-2 text-paper/60">Order #{shipment.order_id ?? '—'}</p>
+        </div>
+        <dl className="grid grid-cols-2 gap-x-8 gap-y-4 text-sm sm:grid-cols-3 lg:text-right">
+          <div><dt className="eyebrow text-paper/50">Status</dt><dd className="mt-1.5 font-semibold">{formatLabel(shipment.shipment_status, 'Unknown')}</dd></div>
+          <div><dt className="eyebrow text-paper/50">Shipped</dt><dd className="mt-1.5 font-semibold">{formatDate(shipment.shipment_date)}</dd></div>
+          <div><dt className="eyebrow text-paper/50">{shipment.actual_delivery ? 'Delivered' : 'Estimated'}</dt><dd className="mt-1.5 font-semibold">{formatDate(shipment.actual_delivery ?? shipment.estimated_delivery)}</dd></div>
+        </dl>
+      </div>
+
+      {cancelled ? (
+        <div className="relative mt-8 flex items-center gap-3 rounded-2xl bg-bad/20 px-4 py-3 text-sm font-semibold text-[#ffd2c4]">
+          <Icon name="x" className="size-4" /> This shipment was cancelled.
+        </div>
+      ) : (
+        <div className="relative mt-10">
+          <div className="absolute top-5 right-5 left-5 h-[3px] rounded-full bg-paper/10" aria-hidden="true">
+            <div className="h-full rounded-full bg-lime transition-[width] duration-700" style={{ width: `${progress}%` }} />
+          </div>
+          <ol className="relative grid grid-cols-5" aria-label="Shipment progress">
+            {PROGRESS_STAGES.map((stage, index) => {
+              const done = index <= reached
+              const current = index === reached
+              return (
+                <li key={stage} className="flex flex-col items-center text-center" aria-current={current ? 'step' : undefined}>
+                  <span className={`grid size-10 place-items-center rounded-full transition-colors ${done ? 'bg-lime text-ink' : 'bg-charcoal text-paper/40 ring-1 ring-paper/15'} ${current ? 'ring-4 ring-lime/30' : ''}`}>
+                    <Icon name={STAGE_ICONS[stage]} className="size-4" />
+                  </span>
+                  <span className={`mt-3 text-[0.7rem] leading-tight font-semibold sm:text-xs ${done ? 'text-paper' : 'text-paper/40'}`}>{formatLabel(stage)}</span>
+                </li>
+              )
+            })}
+          </ol>
+        </div>
+      )}
+    </section>
   )
-}
-
-function EmptyState({ text }) {
-  return (
-    <p className="mt-6 rounded-xl bg-slate-50 px-4 py-10 text-center text-sm text-slate-500">
-      {text}
-    </p>
-  )
-}
-
-function formatLabel(value) {
-  return String(value || 'Unknown')
-    .replaceAll('_', ' ')
-    .toLowerCase()
-    .replace(/\b\w/g, (letter) => letter.toUpperCase())
-}
-
-function formatDateTime(value) {
-  if (!value) return 'Time not recorded'
-
-  const date = new Date(value)
-
-  return Number.isNaN(date.valueOf())
-    ? 'Time not recorded'
-    : new Intl.DateTimeFormat('en-IN', {
-        dateStyle: 'medium',
-        timeStyle: 'short',
-      }).format(date)
 }
 
 export default Tracking

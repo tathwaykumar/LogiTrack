@@ -1,6 +1,11 @@
-
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { ApiError, apiGet } from '../services/apiClient.js'
+import { formatDate } from '../lib/format.js'
+import { DELIVERY_GROUPS, deliveryGroupId, deliveryStatus, summariseDeliveries } from '../lib/status.js'
+import { EmptyState, ErrorState, Icon, PageHeader, RefreshButton, SearchField, StatTile, StatusBadge, stagger } from './ui.jsx'
+
+const COLUMN_TONES = { pending: 'bg-cream', moving: 'bg-lime', done: 'bg-ok-soft', issues: 'bg-bad-soft' }
+const COLUMNS = DELIVERY_GROUPS.map((group) => ({ ...group, tone: COLUMN_TONES[group.id] }))
 
 function Deliveries({ session, onAuthExpired }) {
   const [deliveries, setDeliveries] = useState([])
@@ -45,224 +50,87 @@ function Deliveries({ session, onAuthExpired }) {
     return deliveries.filter((delivery) =>
       String(delivery.delivery_id ?? '').toLowerCase().includes(query) ||
       String(delivery.shipment_id ?? '').toLowerCase().includes(query) ||
-      String(delivery.delivery_status ?? delivery.status ?? '')
-        .toLowerCase()
-        .includes(query)
+      String(delivery.delivery_address ?? '').toLowerCase().includes(query) ||
+      deliveryStatus(delivery).toLowerCase().includes(query)
     )
   }, [deliveries, search])
 
-  const deliveredCount = deliveries.filter((delivery) =>
-    ['DELIVERED', 'COMPLETED'].includes(
-      String(delivery.delivery_status ?? delivery.status ?? '').toUpperCase()
-    )
-  ).length
-
-  const pendingCount = deliveries.filter((delivery) =>
-    ['PENDING', 'SCHEDULED', 'IN_PROGRESS', 'OUT_FOR_DELIVERY'].includes(
-      String(delivery.delivery_status ?? delivery.status ?? '').toUpperCase()
-    )
-  ).length
+  const summary = summariseDeliveries(deliveries)
+  const columns = COLUMNS.map((column) => ({
+    ...column,
+    items: filteredDeliveries.filter((delivery) => deliveryGroupId(delivery) === column.id),
+  }))
 
   return (
-    <div className="mx-auto max-w-7xl space-y-6">
-      <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
-        <div>
-          <p className="text-sm font-semibold uppercase tracking-[0.16em] text-cyan-700">
-            Delivery management
-          </p>
-          <h2 className="mt-2 text-3xl font-semibold tracking-tight text-slate-950">
-            Deliveries
-          </h2>
-          <p className="mt-2 text-slate-600">
-            Monitor delivery progress and completion status.
-          </p>
-        </div>
-
-        <button
-          onClick={() => setRefreshKey((key) => key + 1)}
-          disabled={loading}
-          className="rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:opacity-50"
-        >
-          {loading ? 'Refreshing...' : 'Refresh deliveries'}
-        </button>
-      </div>
+    <div className="space-y-8">
+      <PageHeader
+        eyebrow="Delivery management"
+        title="The last mile,"
+        accent="on one board."
+        description="Monitor delivery progress and completion status, grouped by stage."
+        actions={<RefreshButton onClick={() => setRefreshKey((key) => key + 1)} loading={loading} label="Refresh deliveries" />}
+      />
 
       <div className="grid gap-4 sm:grid-cols-3">
-        <SummaryCard label="Total deliveries" value={deliveries.length} />
-        <SummaryCard label="Pending deliveries" value={pendingCount} />
-        <SummaryCard label="Delivered" value={deliveredCount} />
+        <StatTile label="Total deliveries" value={deliveries.length} icon="truck" loading={loading && !deliveries.length} />
+        <StatTile label="Open" value={summary.open} hint="Pending, out for delivery or failed attempt" icon="clock" tone="lime" loading={loading && !deliveries.length} style={stagger(1)} />
+        <StatTile label="Delivered" value={summary.delivered} icon="check" tone="ink" loading={loading && !deliveries.length} style={stagger(2)} />
       </div>
 
-      <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-        <div className="flex flex-col gap-4 border-b border-slate-200 p-5 sm:flex-row sm:items-center sm:justify-between sm:p-6">
-          <div>
-            <h3 className="font-semibold text-slate-950">
-              All deliveries
-            </h3>
-            <p className="mt-1 text-sm text-slate-500">
-              {filteredDeliveries.length} of {deliveries.length} deliveries
-            </p>
-          </div>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <p className="text-sm text-stone" aria-live="polite">{loading ? 'Loading deliveries…' : `${filteredDeliveries.length} of ${deliveries.length} deliveries`}</p>
+        <SearchField value={search} onChange={setSearch} placeholder="Delivery, shipment, address or status…" label="Search deliveries" className="sm:w-96" />
+      </div>
 
-          <input
-            type="search"
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-            placeholder="Search delivery, shipment or status..."
-            aria-label="Search deliveries"
-            className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm outline-none transition placeholder:text-slate-400 focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100 sm:max-w-sm"
+      {loading && deliveries.length === 0 ? (
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">{COLUMNS.map((column) => <div key={column.id} className="skeleton h-72 rounded-[1.5rem]!" />)}</div>
+      ) : error ? (
+        <div className="panel"><ErrorState title="Unable to load deliveries" message={error} onRetry={() => setRefreshKey((key) => key + 1)} /></div>
+      ) : filteredDeliveries.length === 0 ? (
+        <div className="panel">
+          <EmptyState
+            icon="truck"
+            title={search ? 'No matching deliveries' : 'No deliveries yet'}
+            text={search ? 'Try another delivery ID, shipment ID or status.' : 'Delivery records will appear here when available.'}
+            action={search && <button type="button" onClick={() => setSearch('')} className="btn btn-ink">Clear search</button>}
           />
         </div>
-
-        {loading ? (
-          <div className="space-y-3 p-6" aria-label="Loading deliveries">
-            {[1, 2, 3].map((item) => (
-              <div
-                key={item}
-                className="h-16 animate-pulse rounded-lg bg-slate-100"
-              />
-            ))}
-          </div>
-        ) : error ? (
-          <div className="p-8 text-center">
-            <p className="font-semibold text-slate-900">
-              Unable to load deliveries
-            </p>
-            <p className="mt-2 text-sm text-slate-600">{error}</p>
-            <button
-              onClick={() => setRefreshKey((key) => key + 1)}
-              className="mt-4 rounded-lg bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white hover:bg-slate-800"
-            >
-              Try again
-            </button>
-          </div>
-        ) : filteredDeliveries.length === 0 ? (
-          <div className="px-6 py-14 text-center">
-            <div className="mx-auto grid size-12 place-items-center rounded-xl bg-cyan-50 text-cyan-700">
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.7"
-                className="size-6"
-                aria-hidden="true"
-              >
-                <path d="M3 6h11v11H3zM14 9h3l4 4v4h-7z" />
-                <circle cx="7" cy="19" r="2" />
-                <circle cx="18" cy="19" r="2" />
-              </svg>
-            </div>
-            <h3 className="mt-4 font-semibold text-slate-900">
-              {search ? 'No matching deliveries' : 'No deliveries yet'}
-            </h3>
-            <p className="mt-2 text-sm text-slate-500">
-              {search
-                ? 'Try another delivery ID, shipment ID or status.'
-                : 'Delivery records will appear here when available.'}
-            </p>
-            {search && (
-              <button
-                onClick={() => setSearch('')}
-                className="mt-3 text-sm font-semibold text-cyan-700 hover:text-cyan-800"
-              >
-                Clear search
-              </button>
-            )}
-          </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[650px] text-left text-sm">
-              <thead className="bg-slate-50 text-xs uppercase tracking-wider text-slate-500">
-                <tr>
-                  <th className="px-6 py-4 font-semibold">Delivery ID</th>
-                  <th className="px-6 py-4 font-semibold">Shipment ID</th>
-                  <th className="px-6 py-4 font-semibold">Delivery date</th>
-                  <th className="px-6 py-4 font-semibold">Status</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {filteredDeliveries.map((delivery, index) => (
-                  <tr
-                    key={delivery.delivery_id ?? index}
-                    className="transition hover:bg-slate-50"
-                  >
-                    <td className="whitespace-nowrap px-6 py-4 font-semibold text-slate-900">
-                      #{delivery.delivery_id ?? '—'}
-                    </td>
-                    <td className="whitespace-nowrap px-6 py-4 text-slate-600">
-                      {delivery.shipment_id ?? '—'}
-                    </td>
-                    <td className="whitespace-nowrap px-6 py-4 text-slate-600">
-                      {formatDate(
-                        delivery.actual_delivery_date ??
-                        delivery.delivery_date ??
-                        delivery.scheduled_date
-                      )}
-                    </td>
-                    <td className="whitespace-nowrap px-6 py-4">
-                      <StatusBadge
-                        status={delivery.delivery_status ?? delivery.status}
-                      />
-                    </td>
-                  </tr>
+      ) : (
+        <div className="grid items-start gap-4 md:grid-cols-2 xl:grid-cols-4">
+          {columns.map((column, columnIndex) => (
+            <section key={column.id} aria-label={column.title} className="animate-rise rounded-[1.5rem] border border-line bg-ivory/70 p-3" style={stagger(columnIndex)}>
+              <header className="flex items-center justify-between px-2 pt-1 pb-3">
+                <h2 className="flex items-center gap-2 font-display text-lg font-semibold">
+                  <span className={`size-2.5 rounded-full ring-1 ring-ink/20 ${column.tone}`} aria-hidden="true" />
+                  {column.title}
+                </h2>
+                <span className="rounded-full bg-paper px-2.5 py-0.5 text-xs font-semibold ring-1 ring-line">{column.items.length}</span>
+              </header>
+              <ul className="space-y-2.5">
+                {column.items.map((delivery, index) => (
+                  <li key={delivery.delivery_id ?? index} className="rounded-2xl border border-line bg-paper p-4 shadow-[var(--shadow-card)] transition hover:-translate-y-0.5 hover:border-ink/40">
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <p className="eyebrow text-stone">Delivery</p>
+                        <p className="font-display text-2xl font-semibold">#{delivery.delivery_id ?? '—'}</p>
+                      </div>
+                      <StatusBadge status={delivery.delivery_status ?? delivery.status} />
+                    </div>
+                    <dl className="mt-3 space-y-1.5 text-sm text-graphite">
+                      <div className="flex items-center gap-2"><Icon name="route" className="size-4 text-stone" /><dt className="sr-only">Shipment</dt><dd>Shipment #{delivery.shipment_id ?? '—'}</dd></div>
+                      {delivery.delivery_address && <div className="flex items-start gap-2"><Icon name="pin" className="mt-0.5 size-4 text-stone" /><dt className="sr-only">Address</dt><dd className="leading-5">{delivery.delivery_address}</dd></div>}
+                      <div className="flex items-center gap-2"><Icon name="calendar" className="size-4 text-stone" /><dt className="sr-only">Delivery date</dt><dd>{formatDate(delivery.actual_delivery_date ?? delivery.delivery_date ?? delivery.scheduled_date, deliveryStatus(delivery) === 'DELIVERED' ? 'Delivery date not recorded' : 'Not delivered yet')}</dd></div>
+                    </dl>
+                  </li>
                 ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </section>
+                {column.items.length === 0 && <li className="rounded-2xl border border-dashed border-sand px-4 py-8 text-center text-sm text-mist">Nothing here</li>}
+              </ul>
+            </section>
+          ))}
+        </div>
+      )}
     </div>
   )
-}
-
-function SummaryCard({ label, value }) {
-  return (
-    <article className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-      <p className="text-sm font-medium text-slate-500">{label}</p>
-      <p className="mt-2 text-3xl font-semibold tracking-tight text-slate-950">
-        {value}
-      </p>
-    </article>
-  )
-}
-
-function StatusBadge({ status }) {
-  const value = String(status ?? 'UNKNOWN')
-  const normalized = value.toUpperCase()
-
-  const styles = {
-    DELIVERED: 'bg-emerald-50 text-emerald-700 ring-emerald-600/20',
-    COMPLETED: 'bg-emerald-50 text-emerald-700 ring-emerald-600/20',
-    CANCELLED: 'bg-red-50 text-red-700 ring-red-600/20',
-    PENDING: 'bg-amber-50 text-amber-700 ring-amber-600/20',
-    SCHEDULED: 'bg-violet-50 text-violet-700 ring-violet-600/20',
-    IN_PROGRESS: 'bg-cyan-50 text-cyan-700 ring-cyan-600/20',
-    OUT_FOR_DELIVERY: 'bg-cyan-50 text-cyan-700 ring-cyan-600/20',
-  }
-
-  return (
-    <span
-      className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ring-1 ring-inset ${
-        styles[normalized] ?? 'bg-slate-100 text-slate-700 ring-slate-500/20'
-      }`}
-    >
-      {value.replaceAll('_', ' ')}
-    </span>
-  )
-}
-
-function formatDate(value) {
-  if (!value) return '—'
-
-  const date = new Date(value)
-
-  return Number.isNaN(date.valueOf())
-    ? '—'
-    : new Intl.DateTimeFormat('en-IN', {
-        day: '2-digit',
-        month: 'short',
-        year: 'numeric',
-      }).format(date)
 }
 
 export default Deliveries

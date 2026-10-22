@@ -1,6 +1,7 @@
-
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { ApiError, apiGet } from '../services/apiClient.js'
+import { ApiError, apiGet, apiPost } from '../services/apiClient.js'
+import { formatCurrency, formatDate, formatLabel } from '../lib/format.js'
+import { DataTable, EmptyState, ErrorState, Icon, IdTag, Notice, PageHeader, Panel, RefreshButton, SearchField, SkeletonRows, StatTile, StatusBadge, stagger } from './ui.jsx'
 
 function Payments({ session, onAuthExpired }) {
   const [payments, setPayments] = useState([])
@@ -8,19 +9,27 @@ function Payments({ session, onAuthExpired }) {
   const [error, setError] = useState('')
   const [search, setSearch] = useState('')
   const [refreshKey, setRefreshKey] = useState(0)
+  const [paymentOrders, setPaymentOrders] = useState([])
+  const [simulatingOrderId, setSimulatingOrderId] = useState(null)
+  const [simulationReceipt, setSimulationReceipt] = useState(null)
+  const isCustomer = Number(session.user.roleId) === 4
 
   const loadPayments = useCallback(async () => {
     setLoading(true)
     setError('')
 
     try {
-      const data = await apiGet('/payments', session.accessToken)
+      const [data, pendingOrders] = await Promise.all([
+        apiGet('/payments', session.accessToken),
+        isCustomer ? apiGet('/shop/payment-orders', session.accessToken) : Promise.resolve([]),
+      ])
 
       if (!Array.isArray(data)) {
         throw new Error('Unexpected response from the payments API.')
       }
 
       setPayments(data)
+      setPaymentOrders(Array.isArray(pendingOrders) ? pendingOrders : [])
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         onAuthExpired()
@@ -31,7 +40,7 @@ function Payments({ session, onAuthExpired }) {
     } finally {
       setLoading(false)
     }
-  }, [session.accessToken, onAuthExpired])
+  }, [session.accessToken, onAuthExpired, isCustomer])
 
   useEffect(() => {
     loadPayments()
@@ -45,22 +54,17 @@ function Payments({ session, onAuthExpired }) {
     return payments.filter((payment) =>
       String(payment.payment_id ?? '').toLowerCase().includes(query) ||
       String(payment.order_id ?? '').toLowerCase().includes(query) ||
-      String(payment.payment_status ?? payment.status ?? '')
-        .toLowerCase().includes(query) ||
+      String(payment.payment_status ?? payment.status ?? '').toLowerCase().includes(query) ||
       String(payment.payment_method ?? '').toLowerCase().includes(query)
     )
   }, [payments, search])
 
   const completedCount = payments.filter((payment) =>
-    ['COMPLETED', 'SUCCESS', 'PAID'].includes(
-      String(payment.payment_status ?? payment.status ?? '').toUpperCase()
-    )
+    ['COMPLETED', 'SUCCESS', 'PAID'].includes(String(payment.payment_status ?? payment.status ?? '').toUpperCase())
   ).length
 
   const pendingCount = payments.filter((payment) =>
-    ['PENDING', 'PROCESSING'].includes(
-      String(payment.payment_status ?? payment.status ?? '').toUpperCase()
-    )
+    ['PENDING', 'PROCESSING'].includes(String(payment.payment_status ?? payment.status ?? '').toUpperCase())
   ).length
 
   const totalAmount = payments.reduce((sum, payment) => {
@@ -68,240 +72,131 @@ function Payments({ session, onAuthExpired }) {
     return sum + (Number.isFinite(amount) ? amount : 0)
   }, 0)
 
-  return (
-    <div className="mx-auto max-w-7xl space-y-6">
-      <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
-        <div>
-          <p className="text-sm font-semibold uppercase tracking-[0.16em] text-cyan-700">
-            Financial management
-          </p>
-          <h2 className="mt-2 text-3xl font-semibold tracking-tight text-slate-950">
-            Payments
-          </h2>
-          <p className="mt-2 text-slate-600">
-            Review payment records and transaction statuses.
-          </p>
-        </div>
+  async function simulatePayment(orderId, outcome) {
+    setError('')
+    setSimulationReceipt(null)
+    setSimulatingOrderId(orderId)
+    try {
+      const data = await apiPost('/shop/payments/simulate', { order_id: orderId, outcome }, session.accessToken)
+      setSimulationReceipt(data)
+      setRefreshKey((key) => key + 1)
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        onAuthExpired()
+        return
+      }
+      setError(err.message || 'Unable to simulate payment.')
+    } finally {
+      setSimulatingOrderId(null)
+    }
+  }
 
-        <button
-          onClick={() => setRefreshKey((key) => key + 1)}
-          disabled={loading}
-          className="rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:opacity-50"
-        >
-          {loading ? 'Refreshing...' : 'Refresh payments'}
-        </button>
-      </div>
+  return (
+    <div className="space-y-8">
+      <PageHeader
+        eyebrow="Financial management"
+        title="Payments,"
+        accent="reconciled."
+        description="Review payment records and transaction statuses."
+        actions={<RefreshButton onClick={() => setRefreshKey((key) => key + 1)} loading={loading} label="Refresh payments" />}
+      />
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <SummaryCard label="Total payments" value={payments.length} />
-        <SummaryCard label="Completed" value={completedCount} />
-        <SummaryCard label="Pending" value={pendingCount} />
-        <SummaryCard
-          label="Recorded amount"
-          value={formatAmount(totalAmount)}
-        />
+        <StatTile label="Total payments" value={payments.length} icon="card" loading={loading && !payments.length} />
+        <StatTile label="Completed" value={completedCount} icon="check" tone="lime" loading={loading && !payments.length} style={stagger(1)} />
+        <StatTile label="Pending" value={pendingCount} icon="clock" tone="cream" loading={loading && !payments.length} style={stagger(2)} />
+        <StatTile label="Recorded amount" value={formatCurrency(totalAmount)} icon="wallet" tone="ink" loading={loading && !payments.length} style={stagger(3)} />
       </div>
 
-      <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-        <div className="flex flex-col gap-4 border-b border-slate-200 p-5 sm:flex-row sm:items-center sm:justify-between sm:p-6">
-          <div>
-            <h3 className="font-semibold text-slate-950">
-              Payment records
-            </h3>
-            <p className="mt-1 text-sm text-slate-500">
-              {filteredPayments.length} of {payments.length} payments
-            </p>
-          </div>
+      {error && <Notice tone="error">{error}</Notice>}
 
-          <input
-            type="search"
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-            placeholder="Search payment, order or status..."
-            aria-label="Search payments"
-            className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm outline-none transition placeholder:text-slate-400 focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100 sm:max-w-sm"
-          />
-        </div>
-
-        {loading ? (
-          <div className="space-y-3 p-6" aria-label="Loading payments">
-            {[1, 2, 3].map((item) => (
-              <div
-                key={item}
-                className="h-16 animate-pulse rounded-lg bg-slate-100"
-              />
-            ))}
-          </div>
-        ) : error ? (
-          <div className="p-8 text-center">
-            <p className="font-semibold text-slate-900">
-              Unable to load payments
-            </p>
-            <p className="mt-2 text-sm text-slate-600">{error}</p>
-            <button
-              onClick={() => setRefreshKey((key) => key + 1)}
-              className="mt-4 rounded-lg bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white hover:bg-slate-800"
-            >
-              Try again
-            </button>
-          </div>
-        ) : filteredPayments.length === 0 ? (
-          <div className="px-6 py-14 text-center">
-            <div className="mx-auto grid size-12 place-items-center rounded-xl bg-cyan-50 text-cyan-700">
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.7"
-                className="size-6"
-                aria-hidden="true"
-              >
-                <rect x="3" y="5" width="18" height="14" rx="2" />
-                <path d="M3 10h18M7 15h3" />
-              </svg>
+      {isCustomer && (
+        <section aria-labelledby="simulator-heading" className="animate-rise overflow-hidden rounded-[1.6rem] border-2 border-ink bg-paper">
+          <div className="hazard h-3" aria-hidden="true" />
+          <div className="flex flex-col gap-4 border-b border-line p-5 sm:flex-row sm:items-start sm:justify-between sm:p-6">
+            <div>
+              <p className="eyebrow inline-flex items-center gap-2 rounded-full bg-ink px-3 py-1.5 text-lime">
+                <Icon name="alert" className="size-3.5" /> Development only · no real payment
+              </p>
+              <h2 id="simulator-heading" className="font-display mt-3 text-3xl font-semibold">Payment simulator</h2>
+              <p className="mt-2 max-w-2xl text-sm leading-6 text-stone">This does not collect money or contact a payment provider. The backend records the selected test result and calculates the order amount itself.</p>
             </div>
-            <h3 className="mt-4 font-semibold text-slate-900">
-              {search ? 'No matching payments' : 'No payments yet'}
-            </h3>
-            <p className="mt-2 text-sm text-slate-500">
-              {search
-                ? 'Try another payment ID, order ID or status.'
-                : 'Payment records will appear here when available.'}
-            </p>
-            {search && (
-              <button
-                onClick={() => setSearch('')}
-                className="mt-3 text-sm font-semibold text-cyan-700 hover:text-cyan-800"
-              >
-                Clear search
-              </button>
+          </div>
+
+          <div className="space-y-3 p-5 sm:p-6">
+            {simulationReceipt && (
+              <div role="status" className="on-dark animate-rise rounded-2xl bg-ink p-5 text-paper">
+                <p className="eyebrow text-lime">Simulated payment receipt · development only</p>
+                <p className="mt-2 font-semibold">Order #{simulationReceipt.order_id} — {formatLabel(simulationReceipt.payment_status)}. Invoice #{simulationReceipt.invoice_id} is {formatLabel(simulationReceipt.invoice_status)} for {formatCurrency(simulationReceipt.total_amount)}.</p>
+                {simulationReceipt.fulfilment && <p className="mt-2 text-sm text-paper/70">{simulationReceipt.fulfilment.shipment_id ? `Shipment #${simulationReceipt.fulfilment.shipment_id}: ` : ''}{simulationReceipt.fulfilment.message}</p>}
+              </div>
+            )}
+
+            {loading && paymentOrders.length === 0 ? (
+              <div className="skeleton h-24" />
+            ) : paymentOrders.length === 0 ? (
+              <p className="rounded-2xl border border-dashed border-sand px-4 py-6 text-center text-sm text-stone">No pending customer orders are ready for simulated payment.</p>
+            ) : (
+              <ul className="space-y-3">
+                {paymentOrders.map((order) => (
+                  <li key={order.order_id} className="flex flex-col gap-4 rounded-2xl border border-line bg-ivory/60 p-4 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="flex items-center gap-4">
+                      <span className="grid size-12 place-items-center rounded-2xl bg-cream"><Icon name="file" className="size-5" /></span>
+                      <div>
+                        <p className="font-semibold">Order #{order.order_id} <span className="font-normal text-stone">· Invoice #{order.invoice_id}</span></p>
+                        <p className="mt-0.5 text-sm text-stone">{formatCurrency(order.total_amount)} · Current payment: {formatLabel(order.payment_status || 'NOT STARTED')}</p>
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <button type="button" onClick={() => simulatePayment(order.order_id, 'SUCCESS')} disabled={simulatingOrderId !== null} className="btn btn-ink">
+                        <Icon name="check" className="size-4" />{simulatingOrderId === order.order_id ? 'Processing…' : 'Simulate successful payment'}
+                      </button>
+                      <button type="button" onClick={() => simulatePayment(order.order_id, 'FAILED')} disabled={simulatingOrderId !== null} className="btn btn-danger">
+                        <Icon name="x" className="size-4" />Simulate failed payment
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
             )}
           </div>
+        </section>
+      )}
+
+      <Panel
+        bodyClassName="p-0"
+        title="Payment records"
+        subtitle={`${filteredPayments.length} of ${payments.length} payments`}
+        actions={<SearchField value={search} onChange={setSearch} placeholder="Payment, order or status…" label="Search payments" className="w-full sm:w-72" />}
+      >
+        {loading && payments.length === 0 ? (
+          <SkeletonRows rows={3} label="Loading payments" />
+        ) : error && payments.length === 0 ? (
+          <ErrorState title="Unable to load payments" message={error} onRetry={() => setRefreshKey((key) => key + 1)} />
+        ) : filteredPayments.length === 0 ? (
+          <EmptyState
+            icon="card"
+            title={search ? 'No matching payments' : 'No payments yet'}
+            text={search ? 'Try another payment ID, order ID or status.' : 'Payment records will appear here when available.'}
+            action={search && <button type="button" onClick={() => setSearch('')} className="btn btn-ink">Clear search</button>}
+          />
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[700px] text-left text-sm">
-              <thead className="bg-slate-50 text-xs uppercase tracking-wider text-slate-500">
-                <tr>
-                  <th className="px-6 py-4 font-semibold">Payment ID</th>
-                  <th className="px-6 py-4 font-semibold">Order ID</th>
-                  <th className="px-6 py-4 font-semibold">Amount</th>
-                  <th className="px-6 py-4 font-semibold">Method</th>
-                  <th className="px-6 py-4 font-semibold">Status</th>
-                  <th className="px-6 py-4 font-semibold">Date</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {filteredPayments.map((payment, index) => (
-                  <tr
-                    key={payment.payment_id ?? index}
-                    className="transition hover:bg-slate-50"
-                  >
-                    <td className="whitespace-nowrap px-6 py-4 font-semibold text-slate-900">
-                      #{payment.payment_id ?? '—'}
-                    </td>
-                    <td className="whitespace-nowrap px-6 py-4 text-slate-600">
-                      {payment.order_id ?? '—'}
-                    </td>
-                    <td className="whitespace-nowrap px-6 py-4 font-medium text-slate-800">
-                      {formatAmount(payment.amount ?? payment.payment_amount)}
-                    </td>
-                    <td className="whitespace-nowrap px-6 py-4 text-slate-600">
-                      {formatLabel(payment.payment_method)}
-                    </td>
-                    <td className="whitespace-nowrap px-6 py-4">
-                      <StatusBadge
-                        status={payment.payment_status ?? payment.status}
-                      />
-                    </td>
-                    <td className="whitespace-nowrap px-6 py-4 text-slate-600">
-                      {formatDate(
-                        payment.payment_date ?? payment.transaction_date
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <DataTable head={['Payment', 'Order', 'Amount', 'Method', 'Status', 'Date']} minWidth={760} caption="Payments">
+            {filteredPayments.map((payment, index) => (
+              <tr key={payment.payment_id ?? index}>
+                <td><IdTag>{payment.payment_id}</IdTag></td>
+                <td>#{payment.order_id ?? '—'}</td>
+                <td className="font-semibold text-ink tabular-nums">{formatCurrency(payment.amount ?? payment.payment_amount)}</td>
+                <td>{formatLabel(payment.payment_method)}</td>
+                <td><StatusBadge status={payment.payment_status ?? payment.status} /></td>
+                <td>{formatDate(payment.payment_date ?? payment.transaction_date)}</td>
+              </tr>
+            ))}
+          </DataTable>
         )}
-      </section>
+      </Panel>
     </div>
   )
-}
-
-function SummaryCard({ label, value }) {
-  return (
-    <article className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-      <p className="text-sm font-medium text-slate-500">{label}</p>
-      <p className="mt-2 truncate text-2xl font-semibold tracking-tight text-slate-950">
-        {value}
-      </p>
-    </article>
-  )
-}
-
-function StatusBadge({ status }) {
-  const value = String(status ?? 'UNKNOWN')
-  const normalized = value.toUpperCase()
-
-  const styles = {
-    COMPLETED: 'bg-emerald-50 text-emerald-700 ring-emerald-600/20',
-    SUCCESS: 'bg-emerald-50 text-emerald-700 ring-emerald-600/20',
-    PAID: 'bg-emerald-50 text-emerald-700 ring-emerald-600/20',
-    FAILED: 'bg-red-50 text-red-700 ring-red-600/20',
-    CANCELLED: 'bg-red-50 text-red-700 ring-red-600/20',
-    PENDING: 'bg-amber-50 text-amber-700 ring-amber-600/20',
-    PROCESSING: 'bg-cyan-50 text-cyan-700 ring-cyan-600/20',
-  }
-
-  return (
-    <span
-      className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ring-1 ring-inset ${
-        styles[normalized] ?? 'bg-slate-100 text-slate-700 ring-slate-500/20'
-      }`}
-    >
-      {formatLabel(value)}
-    </span>
-  )
-}
-
-function formatLabel(value) {
-  if (!value) return '—'
-
-  return String(value)
-    .replaceAll('_', ' ')
-    .toLowerCase()
-    .replace(/\b\w/g, (letter) => letter.toUpperCase())
-}
-
-function formatAmount(value) {
-  if (value === null || value === undefined || value === '') {
-    return '—'
-  }
-
-  const amount = Number(value)
-
-  return Number.isFinite(amount)
-    ? new Intl.NumberFormat('en-IN', {
-        style: 'currency',
-        currency: 'INR',
-        maximumFractionDigits: 2,
-      }).format(amount)
-    : String(value)
-}
-
-function formatDate(value) {
-  if (!value) return '—'
-
-  const date = new Date(value)
-
-  return Number.isNaN(date.valueOf())
-    ? '—'
-    : new Intl.DateTimeFormat('en-IN', {
-        day: '2-digit',
-        month: 'short',
-        year: 'numeric',
-      }).format(date)
 }
 
 export default Payments

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, TIMESTAMP, ForeignKey, Date, Numeric, PrimaryKeyConstraint, Interval, ForeignKeyConstraint, text
+from sqlalchemy import Column, Integer, String, Boolean, TIMESTAMP, ForeignKey, Date, Numeric, PrimaryKeyConstraint, Interval, ForeignKeyConstraint, UniqueConstraint, Index, text
 from sqlalchemy.orm import declarative_base
 
 Base = declarative_base()
@@ -178,6 +178,43 @@ class OrderItem(Base):
     quantity = Column(Integer, nullable=False)
     unit_price = Column(Numeric(10, 2), nullable=False)
 
+class OrderInventoryReservation(Base):
+    __tablename__ = "order_inventory_reservation"
+
+    reservation_id = Column(Integer, primary_key=True, index=True)
+    order_id = Column(
+        Integer,
+        ForeignKey("orders.order_id"),
+        nullable=False
+    )
+    warehouse_id = Column(
+        Integer,
+        ForeignKey("warehouse.warehouse_id"),
+        nullable=False
+    )
+    product_id = Column(
+        Integer,
+        ForeignKey("product.product_id"),
+        nullable=False
+    )
+    reserved_quantity = Column(Integer, nullable=False)
+    created_at = Column(
+        TIMESTAMP,
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP")
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "order_id", "warehouse_id", "product_id",
+            name="uq_reservation_order_warehouse_product"
+        ),
+        ForeignKeyConstraint(
+            ["order_id", "product_id"],
+            ["order_item.order_id", "order_item.product_id"]
+        ),
+    )
+
 class Route(Base):
     __tablename__ = "route"
 
@@ -220,6 +257,15 @@ class Shipment(Base):
         String(30),
         nullable=False,
         default="CREATED"
+    )
+
+    __table_args__ = (
+        Index(
+            "uq_shipment_order_active",
+            "order_id",
+            unique=True,
+            postgresql_where=text("shipment_status <> 'CANCELLED'")
+        ),
     )
 
 class ShipmentItem(Base):

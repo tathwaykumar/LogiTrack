@@ -1,11 +1,17 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { ApiError, apiGet } from '../services/apiClient.js'
+import { formatCurrency, formatDate, formatLabel } from '../lib/format.js'
+import ProductImage from './ProductImage.jsx'
+import { EmptyState, ErrorState, FilterChips, Icon, PageHeader, RefreshButton, SearchField, SkeletonRows, StatTile, StatusBadge, stagger } from './ui.jsx'
+
+const ORDER_STATUSES = ['PENDING', 'CONFIRMED', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED']
 
 function Orders({ session, onAuthExpired }) {
   const [orders, setOrders] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [search, setSearch] = useState('')
+  const [statusFilter, setStatusFilter] = useState('ALL')
   const [refreshKey, setRefreshKey] = useState(0)
 
   const loadOrders = useCallback(async () => {
@@ -39,9 +45,10 @@ function Orders({ session, onAuthExpired }) {
   const filteredOrders = useMemo(() => {
     const query = search.trim().toLowerCase()
 
-    if (!query) return orders
-
     return orders.filter((order) => {
+      if (statusFilter !== 'ALL' && String(order.order_status ?? '').toUpperCase() !== statusFilter) return false
+      if (!query) return true
+
       const orderMatches =
         String(order.order_id ?? '').toLowerCase().includes(query) ||
         String(order.order_status ?? '').toLowerCase().includes(query)
@@ -52,7 +59,7 @@ function Orders({ session, onAuthExpired }) {
 
       return orderMatches || itemMatches
     })
-  }, [orders, search])
+  }, [orders, search, statusFilter])
 
   const pendingCount = orders.filter((order) =>
     !['DELIVERED', 'COMPLETED', 'CANCELLED'].includes(
@@ -60,214 +67,56 @@ function Orders({ session, onAuthExpired }) {
     )
   ).length
 
-  function getOrderAmount(order) {
-    if (
-      order.total_amount !== null &&
-      order.total_amount !== undefined &&
-      order.total_amount !== ''
-    ) {
-      return formatAmount(order.total_amount)
-    }
+  const statusCounts = orders.reduce((counts, order) => {
+    const key = String(order.order_status ?? '').toUpperCase()
+    return { ...counts, [key]: (counts[key] ?? 0) + 1 }
+  }, {})
+  const statusOptions = [
+    { value: 'ALL', label: 'All', count: orders.length },
+    ...ORDER_STATUSES.filter((status) => statusCounts[status]).map((status) => ({ value: status, label: formatLabel(status), count: statusCounts[status] })),
+  ]
 
-    const items = order.items ?? []
-
-    if (items.length === 0) return '—'
-
-    const total = items.reduce(
-      (sum, item) =>
-        sum +
-        Number(item.item_total ?? (
-          Number(item.quantity ?? 0) * Number(item.unit_price ?? 0)
-        )),
-      0
-    )
-
-    return formatAmount(total)
-  }
+  const totalValue = orders.reduce((sum, order) => sum + (orderAmountValue(order) ?? 0), 0)
 
   return (
-    <div className="mx-auto max-w-7xl space-y-6">
-      <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
-        <div>
-          <p className="text-sm font-semibold uppercase tracking-[0.16em] text-cyan-700">
-            Order management
-          </p>
-          <h2 className="mt-2 text-3xl font-semibold tracking-tight text-slate-950">
-            Orders
-          </h2>
-          <p className="mt-2 text-slate-600">
-            View your orders and the products included in each order.
-          </p>
-        </div>
+    <div className="space-y-8">
+      <PageHeader
+        eyebrow="Order management"
+        title="Orders,"
+        accent="line by line."
+        description="Every order with the products, quantities and amounts it contains."
+        actions={<RefreshButton onClick={() => setRefreshKey((key) => key + 1)} loading={loading} label="Refresh orders" />}
+      />
 
-        <button
-          type="button"
-          onClick={() => setRefreshKey((key) => key + 1)}
-          disabled={loading}
-          className="rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {loading ? 'Refreshing...' : 'Refresh orders'}
-        </button>
+      <div className="grid gap-4 sm:grid-cols-3">
+        <StatTile label="Total orders" value={loading ? '—' : orders.length} icon="box" loading={loading && !orders.length} />
+        <StatTile label="Open orders" value={loading ? '—' : pendingCount} hint="Not yet delivered or cancelled" icon="clock" tone="lime" loading={loading && !orders.length} style={stagger(1)} />
+        <StatTile label="Order value" value={loading ? '—' : formatCurrency(totalValue)} hint="Sum of item totals" icon="wallet" tone="ink" loading={loading && !orders.length} style={stagger(2)} />
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2">
-        <SummaryCard label="Total orders" value={loading ? '—' : orders.length} />
-        <SummaryCard label="Open orders" value={loading ? '—' : pendingCount} />
-      </div>
-
-      <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-        <div className="flex flex-col gap-4 border-b border-slate-200 p-5 sm:flex-row sm:items-center sm:justify-between sm:p-6">
-          <div>
-            <h3 className="font-semibold text-slate-950">All orders</h3>
-            <p className="mt-1 text-sm text-slate-500">
-              {filteredOrders.length} of {orders.length} orders
-            </p>
-          </div>
-
-          <input
-            type="search"
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-            placeholder="Search order ID, status, or product..."
-            aria-label="Search orders and products"
-            className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm outline-none transition placeholder:text-slate-400 focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100 sm:max-w-xs"
-          />
+      <section className="space-y-5">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+          <FilterChips label="Filter orders by status" options={statusOptions} value={statusFilter} onChange={setStatusFilter} />
+          <SearchField value={search} onChange={setSearch} placeholder="Order ID, status or product…" label="Search orders and products" className="lg:w-80" />
         </div>
+        <p className="text-sm text-stone" aria-live="polite">{loading ? 'Loading orders…' : `${filteredOrders.length} of ${orders.length} orders`}</p>
 
-        {loading ? (
-          <div className="space-y-3 p-6" aria-label="Loading orders">
-            {[1, 2, 3].map((item) => (
-              <div
-                key={item}
-                className="h-16 animate-pulse rounded-lg bg-slate-100"
-              />
-            ))}
-          </div>
+        {loading && orders.length === 0 ? (
+          <div className="panel"><SkeletonRows rows={3} height="h-28" label="Loading orders" /></div>
         ) : error ? (
-          <div className="p-8 text-center">
-            <p className="font-semibold text-slate-900">
-              Unable to load orders
-            </p>
-            <p className="mt-2 text-sm text-slate-600">{error}</p>
-            <button
-              type="button"
-              onClick={() => setRefreshKey((key) => key + 1)}
-              className="mt-4 rounded-lg bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white hover:bg-slate-800"
-            >
-              Try again
-            </button>
-          </div>
+          <div className="panel"><ErrorState title="Unable to load orders" message={error} onRetry={() => setRefreshKey((key) => key + 1)} /></div>
         ) : filteredOrders.length === 0 ? (
-          <div className="px-6 py-14 text-center">
-            <h3 className="font-semibold text-slate-900">
-              {search ? 'No matching orders' : 'No orders yet'}
-            </h3>
-            <p className="mt-2 text-sm text-slate-500">
-              {search
-                ? 'Try another order ID, status, or product name.'
-                : 'Orders will appear here when they are available.'}
-            </p>
-            {search && (
-              <button
-                type="button"
-                onClick={() => setSearch('')}
-                className="mt-3 text-sm font-semibold text-cyan-700 hover:text-cyan-800"
-              >
-                Clear search
-              </button>
-            )}
+          <div className="panel">
+            <EmptyState
+              icon="box"
+              title={search || statusFilter !== 'ALL' ? 'No matching orders' : 'No orders yet'}
+              text={search || statusFilter !== 'ALL' ? 'Try another order ID, status, or product name.' : 'Orders will appear here when they are available.'}
+              action={(search || statusFilter !== 'ALL') && <button type="button" onClick={() => { setSearch(''); setStatusFilter('ALL') }} className="btn btn-ink">Clear filters</button>}
+            />
           </div>
         ) : (
-          <div className="divide-y divide-slate-200">
-            {filteredOrders.map((order, index) => (
-              <article
-                key={order.order_id ?? index}
-                className="p-5 transition hover:bg-slate-50 sm:p-6"
-              >
-                <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
-                  <div>
-                    <h4 className="font-semibold text-slate-950">
-                      Order #{order.order_id ?? '—'}
-                    </h4>
-                    <p className="mt-1 text-sm text-slate-500">
-                      Order date: {formatDate(order.order_date)}
-                    </p>
-                    {order.shipping_address && (
-                      <p className="mt-1 text-sm text-slate-500">
-                        Shipping address: {order.shipping_address}
-                      </p>
-                    )}
-                  </div>
-
-                  <div className="flex flex-wrap items-center gap-3 sm:justify-end">
-                    <StatusBadge status={order.order_status} />
-                    <div className="sm:text-right">
-                      <p className="text-xs text-slate-500">Order amount</p>
-                      <p className="mt-1 font-semibold text-slate-950">
-                        {getOrderAmount(order)}
-                      </p>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="mt-5 overflow-hidden rounded-xl border border-slate-200">
-                  <div className="border-b border-slate-200 bg-slate-50 px-4 py-3">
-                    <h5 className="text-sm font-semibold text-slate-800">
-                      Ordered items ({(order.items ?? []).length})
-                    </h5>
-                  </div>
-
-                  {(order.items ?? []).length === 0 ? (
-                    <p className="px-4 py-5 text-sm text-slate-500">
-                      No item details were returned for this order.
-                    </p>
-                  ) : (
-                    <div className="divide-y divide-slate-100">
-                      {(order.items ?? []).map((item, itemIndex) => (
-                        <div
-                          key={`${item.product_id ?? itemIndex}-${itemIndex}`}
-                          className="flex flex-col justify-between gap-3 px-4 py-4 sm:flex-row sm:items-center"
-                        >
-                          <div className="min-w-0">
-                            <p className="font-medium text-slate-900">
-                              {item.product_name ?? `Product #${item.product_id ?? '—'}`}
-                            </p>
-                            <p className="mt-1 text-sm text-slate-500">
-                              Product ID: {item.product_id ?? '—'}
-                            </p>
-                          </div>
-
-                          <div className="grid grid-cols-3 gap-4 text-sm sm:min-w-[300px]">
-                            <div>
-                              <p className="text-xs text-slate-500">Quantity</p>
-                              <p className="mt-1 font-medium text-slate-800">
-                                {item.quantity ?? '—'}
-                              </p>
-                            </div>
-                            <div>
-                              <p className="text-xs text-slate-500">Unit price</p>
-                              <p className="mt-1 font-medium text-slate-800">
-                                {formatAmount(item.unit_price)}
-                              </p>
-                            </div>
-                            <div>
-                              <p className="text-xs text-slate-500">Item total</p>
-                              <p className="mt-1 font-semibold text-slate-900">
-                                {formatAmount(
-                                  item.item_total ??
-                                    Number(item.quantity ?? 0) *
-                                      Number(item.unit_price ?? 0)
-                                )}
-                              </p>
-                            </div>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </article>
-            ))}
+          <div className="space-y-4">
+            {filteredOrders.map((order, index) => <OrderTicket key={order.order_id ?? index} order={order} index={index} />)}
           </div>
         )}
       </section>
@@ -275,67 +124,62 @@ function Orders({ session, onAuthExpired }) {
   )
 }
 
-function SummaryCard({ label, value }) {
+function orderAmountValue(order) {
+  if (order.total_amount !== null && order.total_amount !== undefined && order.total_amount !== '') return Number(order.total_amount)
+  const items = order.items ?? []
+  if (items.length === 0) return null
+  return items.reduce((sum, item) => sum + Number(item.item_total ?? Number(item.quantity ?? 0) * Number(item.unit_price ?? 0)), 0)
+}
+
+function OrderTicket({ order, index }) {
+  const items = order.items ?? []
+  const amount = orderAmountValue(order)
   return (
-    <article className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-      <p className="text-sm font-medium text-slate-500">{label}</p>
-      <p className="mt-2 text-3xl font-semibold tracking-tight text-slate-950">
-        {value}
-      </p>
+    <article className="panel animate-rise overflow-hidden" style={stagger(Math.min(index, 6), 50)}>
+      <div className="grid gap-0 lg:grid-cols-[17rem_minmax(0,1fr)]">
+        <div className="flex flex-col justify-between gap-6 border-b border-line bg-ivory/60 p-5 sm:p-6 lg:border-r lg:border-b-0">
+          <div>
+            <p className="eyebrow text-stone">Order</p>
+            <p className="font-display mt-1 text-4xl font-semibold">#{order.order_id ?? '—'}</p>
+            <div className="mt-3"><StatusBadge status={order.order_status} /></div>
+          </div>
+          <dl className="space-y-3 text-sm">
+            <div className="flex items-center gap-2 text-stone"><Icon name="calendar" className="size-4" /><dd>{formatDate(order.order_date)}</dd></div>
+            {order.shipping_address && <div className="flex items-start gap-2 text-stone"><Icon name="pin" className="mt-0.5 size-4" /><dd className="leading-5">{order.shipping_address}</dd></div>}
+            <div className="border-t border-line pt-3">
+              <dt className="eyebrow text-stone">Order amount</dt>
+              <dd className="mt-1 text-2xl font-semibold tracking-[-0.03em] text-ink">{amount === null ? '—' : formatCurrency(amount)}</dd>
+            </div>
+          </dl>
+        </div>
+
+        <div className="p-2 sm:p-3">
+          {items.length === 0 ? (
+            <p className="px-4 py-8 text-sm text-stone">No item details were returned for this order.</p>
+          ) : (
+            <ul className="divide-y divide-line">
+              {items.map((item, itemIndex) => (
+                <li key={`${item.product_id ?? itemIndex}-${itemIndex}`} className="flex flex-col gap-3 px-3 py-3 sm:flex-row sm:items-center">
+                  <div className="flex min-w-0 flex-1 items-center gap-4">
+                    <ProductImage name={item.product_name} className="size-16 shrink-0 rounded-2xl" />
+                    <div className="min-w-0">
+                      <p className="truncate font-semibold">{item.product_name ?? `Product #${item.product_id ?? '—'}`}</p>
+                      <p className="font-mono text-xs text-stone">SKU {item.product_id ?? '—'}</p>
+                    </div>
+                  </div>
+                  <dl className="grid grid-cols-3 gap-4 text-sm sm:w-80 sm:text-right">
+                    <div><dt className="eyebrow text-mist">Qty</dt><dd className="mt-1 font-semibold">{item.quantity ?? '—'}</dd></div>
+                    <div><dt className="eyebrow text-mist">Unit</dt><dd className="mt-1 text-graphite">{formatCurrency(item.unit_price)}</dd></div>
+                    <div><dt className="eyebrow text-mist">Total</dt><dd className="mt-1 font-semibold">{formatCurrency(item.item_total ?? Number(item.quantity ?? 0) * Number(item.unit_price ?? 0))}</dd></div>
+                  </dl>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
     </article>
   )
-}
-
-function StatusBadge({ status }) {
-  const value = String(status ?? 'UNKNOWN')
-  const normalized = value.toUpperCase()
-
-  const styles = {
-    DELIVERED: 'bg-emerald-50 text-emerald-700 ring-emerald-600/20',
-    COMPLETED: 'bg-emerald-50 text-emerald-700 ring-emerald-600/20',
-    CANCELLED: 'bg-red-50 text-red-700 ring-red-600/20',
-    PENDING: 'bg-amber-50 text-amber-700 ring-amber-600/20',
-    PROCESSING: 'bg-cyan-50 text-cyan-700 ring-cyan-600/20',
-    CONFIRMED: 'bg-violet-50 text-violet-700 ring-violet-600/20',
-  }
-
-  return (
-    <span
-      className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ring-1 ring-inset ${
-        styles[normalized] ?? 'bg-slate-100 text-slate-700 ring-slate-500/20'
-      }`}
-    >
-      {value.replaceAll('_', ' ')}
-    </span>
-  )
-}
-
-function formatDate(value) {
-  if (!value) return '—'
-
-  const date = new Date(value)
-
-  return Number.isNaN(date.valueOf())
-    ? '—'
-    : new Intl.DateTimeFormat('en-IN', {
-        day: '2-digit',
-        month: 'short',
-        year: 'numeric',
-      }).format(date)
-}
-
-function formatAmount(value) {
-  if (value === null || value === undefined || value === '') return '—'
-
-  const amount = Number(value)
-
-  return Number.isFinite(amount)
-    ? new Intl.NumberFormat('en-IN', {
-        style: 'currency',
-        currency: 'INR',
-        maximumFractionDigits: 2,
-      }).format(amount)
-    : String(value)
 }
 
 export default Orders

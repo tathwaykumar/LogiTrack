@@ -1,12 +1,17 @@
-
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { ApiError, apiGet } from '../services/apiClient.js'
+import { formatDate, formatLabel } from '../lib/format.js'
+import { StageStrip } from './charts.jsx'
+import { DataTable, EmptyState, ErrorState, FilterChips, IdTag, PageHeader, Panel, RefreshButton, SearchField, SkeletonRows, StatTile, StatusBadge, stagger } from './ui.jsx'
 
-function Shipments({ session, onAuthExpired }) {
+const STAGES = ['CREATED', 'PICKED_UP', 'IN_TRANSIT', 'OUT_FOR_DELIVERY', 'DELIVERED', 'CANCELLED']
+
+function Shipments({ session, onAuthExpired, onNavigate }) {
   const [shipments, setShipments] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [search, setSearch] = useState('')
+  const [statusFilter, setStatusFilter] = useState('ALL')
   const [refreshKey, setRefreshKey] = useState(0)
 
   const loadShipments = useCallback(async () => {
@@ -40,221 +45,90 @@ function Shipments({ session, onAuthExpired }) {
   const filteredShipments = useMemo(() => {
     const query = search.trim().toLowerCase()
 
-    if (!query) return shipments
-
-    return shipments.filter((shipment) =>
-      String(shipment.shipment_id ?? '').toLowerCase().includes(query) ||
-      String(shipment.order_id ?? '').toLowerCase().includes(query) ||
-      String(shipment.shipment_status ?? '').toLowerCase().includes(query)
-    )
-  }, [shipments, search])
+    return shipments.filter((shipment) => {
+      if (statusFilter !== 'ALL' && String(shipment.shipment_status ?? '').toUpperCase() !== statusFilter) return false
+      if (!query) return true
+      return String(shipment.shipment_id ?? '').toLowerCase().includes(query) ||
+        String(shipment.order_id ?? '').toLowerCase().includes(query) ||
+        String(shipment.shipment_status ?? '').toLowerCase().includes(query)
+    })
+  }, [shipments, search, statusFilter])
 
   const activeCount = shipments.filter((shipment) =>
-    !['DELIVERED', 'CANCELLED'].includes(
-      String(shipment.shipment_status ?? '').toUpperCase()
-    )
+    !['DELIVERED', 'CANCELLED'].includes(String(shipment.shipment_status ?? '').toUpperCase())
   ).length
 
   const deliveredCount = shipments.filter(
-    (shipment) =>
-      String(shipment.shipment_status ?? '').toUpperCase() === 'DELIVERED'
+    (shipment) => String(shipment.shipment_status ?? '').toUpperCase() === 'DELIVERED'
   ).length
 
+  const counts = shipments.reduce((result, shipment) => {
+    const key = String(shipment.shipment_status ?? '').toUpperCase()
+    return { ...result, [key]: (result[key] ?? 0) + 1 }
+  }, {})
+  const stages = STAGES.map((status) => ({ key: status, label: formatLabel(status), value: counts[status] ?? 0 }))
+  const options = [{ value: 'ALL', label: 'All', count: shipments.length }, ...STAGES.filter((status) => counts[status]).map((status) => ({ value: status, label: formatLabel(status), count: counts[status] }))]
+
   return (
-    <div className="mx-auto max-w-7xl space-y-6">
-      <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
-        <div>
-          <p className="text-sm font-semibold uppercase tracking-[0.16em] text-cyan-700">
-            Shipment management
-          </p>
-          <h2 className="mt-2 text-3xl font-semibold tracking-tight text-slate-950">
-            Shipments
-          </h2>
-          <p className="mt-2 text-slate-600">
-            Monitor shipment status and delivery progress.
-          </p>
-        </div>
+    <div className="space-y-8">
+      <PageHeader
+        eyebrow="Shipment management"
+        title="Shipments"
+        accent="in flight."
+        description="Monitor shipment status and delivery progress across the network."
+        actions={<RefreshButton onClick={() => setRefreshKey((key) => key + 1)} loading={loading} label="Refresh shipments" />}
+      />
 
-        <button
-          onClick={() => setRefreshKey((key) => key + 1)}
-          disabled={loading}
-          className="rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:opacity-50"
-        >
-          {loading ? 'Refreshing...' : 'Refresh shipments'}
-        </button>
+      <div className="grid gap-4 lg:grid-cols-[1fr_1fr_1fr_1.6fr]">
+        <StatTile label="Total shipments" value={shipments.length} icon="route" loading={loading && !shipments.length} />
+        <StatTile label="Active" value={activeCount} hint="Not delivered or cancelled" icon="truck" tone="lime" loading={loading && !shipments.length} style={stagger(1)} />
+        <StatTile label="Delivered" value={deliveredCount} icon="check" tone="ink" loading={loading && !shipments.length} style={stagger(2)} />
+        <Panel eyebrow="Distribution" title="By stage" style={stagger(3)}>
+          {shipments.length ? <StageStrip items={stages} /> : <p className="text-sm text-stone">{loading ? 'Loading…' : 'No shipments yet.'}</p>}
+        </Panel>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-3">
-        <SummaryCard label="Total shipments" value={shipments.length} />
-        <SummaryCard label="Active shipments" value={activeCount} />
-        <SummaryCard label="Delivered" value={deliveredCount} />
-      </div>
-
-      <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-        <div className="flex flex-col gap-4 border-b border-slate-200 p-5 sm:flex-row sm:items-center sm:justify-between sm:p-6">
-          <div>
-            <h3 className="font-semibold text-slate-950">
-              All shipments
-            </h3>
-            <p className="mt-1 text-sm text-slate-500">
-              {filteredShipments.length} of {shipments.length} shipments
-            </p>
-          </div>
-
-          <input
-            type="search"
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-            placeholder="Search shipment, order or status..."
-            aria-label="Search shipments"
-            className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm outline-none transition placeholder:text-slate-400 focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100 sm:max-w-sm"
-          />
+      <Panel
+        bodyClassName="p-0"
+        title="All shipments"
+        subtitle={`${filteredShipments.length} of ${shipments.length} shipments`}
+        actions={<SearchField value={search} onChange={setSearch} placeholder="Shipment, order or status…" label="Search shipments" className="w-full sm:w-72" />}
+      >
+        <div className="border-b border-line px-5 py-3 sm:px-6">
+          <FilterChips label="Filter shipments by status" options={options} value={statusFilter} onChange={setStatusFilter} />
         </div>
-
-        {loading ? (
-          <div className="space-y-3 p-6" aria-label="Loading shipments">
-            {[1, 2, 3].map((item) => (
-              <div
-                key={item}
-                className="h-16 animate-pulse rounded-lg bg-slate-100"
-              />
-            ))}
-          </div>
+        {loading && shipments.length === 0 ? (
+          <SkeletonRows rows={4} label="Loading shipments" />
         ) : error ? (
-          <div className="p-8 text-center">
-            <p className="font-semibold text-slate-900">
-              Unable to load shipments
-            </p>
-            <p className="mt-2 text-sm text-slate-600">{error}</p>
-            <button
-              onClick={() => setRefreshKey((key) => key + 1)}
-              className="mt-4 rounded-lg bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white hover:bg-slate-800"
-            >
-              Try again
-            </button>
-          </div>
+          <ErrorState title="Unable to load shipments" message={error} onRetry={() => setRefreshKey((key) => key + 1)} />
         ) : filteredShipments.length === 0 ? (
-          <div className="px-6 py-14 text-center">
-            <div className="mx-auto grid size-12 place-items-center rounded-xl bg-cyan-50 text-cyan-700">
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.7"
-                className="size-6"
-                aria-hidden="true"
-              >
-                <path d="M4 7.5 12 3l8 4.5v9L12 21l-8-4.5z" />
-                <path d="m4 7.5 8 4.5 8-4.5M12 12v9" />
-              </svg>
-            </div>
-            <h3 className="mt-4 font-semibold text-slate-900">
-              {search ? 'No matching shipments' : 'No shipments yet'}
-            </h3>
-            <p className="mt-2 text-sm text-slate-500">
-              {search
-                ? 'Try another shipment ID, order ID or status.'
-                : 'Shipments will appear here when they are available.'}
-            </p>
-            {search && (
-              <button
-                onClick={() => setSearch('')}
-                className="mt-3 text-sm font-semibold text-cyan-700 hover:text-cyan-800"
-              >
-                Clear search
-              </button>
-            )}
-          </div>
+          <EmptyState
+            icon="route"
+            title={search || statusFilter !== 'ALL' ? 'No matching shipments' : 'No shipments yet'}
+            text={search || statusFilter !== 'ALL' ? 'Try another shipment ID, order ID or status.' : 'Shipments will appear here when they are available.'}
+            action={(search || statusFilter !== 'ALL') && <button type="button" onClick={() => { setSearch(''); setStatusFilter('ALL') }} className="btn btn-ink">Clear filters</button>}
+          />
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[720px] text-left text-sm">
-              <thead className="bg-slate-50 text-xs uppercase tracking-wider text-slate-500">
-                <tr>
-                  <th className="px-6 py-4 font-semibold">Shipment ID</th>
-                  <th className="px-6 py-4 font-semibold">Order ID</th>
-                  <th className="px-6 py-4 font-semibold">Shipment date</th>
-                  <th className="px-6 py-4 font-semibold">Estimated delivery</th>
-                  <th className="px-6 py-4 font-semibold">Status</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {filteredShipments.map((shipment, index) => (
-                  <tr
-                    key={shipment.shipment_id ?? index}
-                    className="transition hover:bg-slate-50"
-                  >
-                    <td className="whitespace-nowrap px-6 py-4 font-semibold text-slate-900">
-                      #{shipment.shipment_id ?? '—'}
-                    </td>
-                    <td className="whitespace-nowrap px-6 py-4 text-slate-600">
-                      {shipment.order_id ?? '—'}
-                    </td>
-                    <td className="whitespace-nowrap px-6 py-4 text-slate-600">
-                      {formatDate(shipment.shipment_date)}
-                    </td>
-                    <td className="whitespace-nowrap px-6 py-4 text-slate-600">
-                      {formatDate(shipment.estimated_delivery)}
-                    </td>
-                    <td className="whitespace-nowrap px-6 py-4">
-                      <StatusBadge status={shipment.shipment_status} />
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <DataTable head={['Shipment', 'Order', 'Origin', 'Route', 'Shipped', 'Estimated delivery', 'Status']} minWidth={860} caption="Shipments">
+            {filteredShipments.map((shipment, index) => (
+              <tr key={shipment.shipment_id ?? index}>
+                <td><IdTag>{shipment.shipment_id}</IdTag></td>
+                <td>#{shipment.order_id ?? '—'}</td>
+                <td>{shipment.warehouse_id ? `Warehouse ${shipment.warehouse_id}` : '—'}</td>
+                <td>{shipment.route_id ? `Route ${shipment.route_id}` : '—'}</td>
+                <td>{formatDate(shipment.shipment_date)}</td>
+                <td>{formatDate(shipment.actual_delivery ?? shipment.estimated_delivery)}</td>
+                <td><StatusBadge status={shipment.shipment_status} /></td>
+              </tr>
+            ))}
+          </DataTable>
         )}
-      </section>
+      </Panel>
+      {onNavigate && shipments.length > 0 && (
+        <p className="text-sm text-stone">Need the event history? <button type="button" onClick={() => onNavigate('tracking')} className="font-semibold text-ink underline decoration-lime decoration-2 underline-offset-4">Open tracking</button></p>
+      )}
     </div>
   )
-}
-
-function SummaryCard({ label, value }) {
-  return (
-    <article className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-      <p className="text-sm font-medium text-slate-500">{label}</p>
-      <p className="mt-2 text-3xl font-semibold tracking-tight text-slate-950">
-        {value}
-      </p>
-    </article>
-  )
-}
-
-function StatusBadge({ status }) {
-  const value = String(status ?? 'UNKNOWN')
-  const normalized = value.toUpperCase()
-
-  const styles = {
-    DELIVERED: 'bg-emerald-50 text-emerald-700 ring-emerald-600/20',
-    CANCELLED: 'bg-red-50 text-red-700 ring-red-600/20',
-    PENDING: 'bg-amber-50 text-amber-700 ring-amber-600/20',
-    IN_TRANSIT: 'bg-cyan-50 text-cyan-700 ring-cyan-600/20',
-    DISPATCHED: 'bg-violet-50 text-violet-700 ring-violet-600/20',
-  }
-
-  return (
-    <span
-      className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ring-1 ring-inset ${
-        styles[normalized] ?? 'bg-slate-100 text-slate-700 ring-slate-500/20'
-      }`}
-    >
-      {value.replaceAll('_', ' ')}
-    </span>
-  )
-}
-
-function formatDate(value) {
-  if (!value) return '—'
-
-  const date = new Date(value)
-
-  return Number.isNaN(date.valueOf())
-    ? '—'
-    : new Intl.DateTimeFormat('en-IN', {
-        day: '2-digit',
-        month: 'short',
-        year: 'numeric',
-      }).format(date)
 }
 
 export default Shipments
