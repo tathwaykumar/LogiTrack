@@ -1,0 +1,8 @@
+# Runtime dependencies (versions the project was developed and verified with).
+fastapi==0.141.1
+uvicorn==0.52.4
+SQLAlchemy==2.0.52
+psycopg2-binary==2.9.12
+python-dotenv==1.2.3
+PyJWT==2.14.0
+pwdlib[argon2]==0.3.1

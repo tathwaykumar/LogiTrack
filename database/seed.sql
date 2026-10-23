@@ -1,6 +1,18 @@
 -- ============================================
 -- LogiTrack Seed Data
 -- ============================================
+--
+-- Load this file after schema.sql. It works both before and after the files in
+-- database/migrations/ (the recommended order is schema -> seed -> migrations).
+-- It runs in one transaction. The historical shipment/tracking/delivery rows below
+-- are loaded exactly as written, so the status-rule triggers (migration 003) are
+-- switched off for the duration of the load and switched back on before COMMIT.
+
+BEGIN;
+
+ALTER TABLE shipment_tracking DISABLE TRIGGER USER;
+ALTER TABLE shipment DISABLE TRIGGER USER;
+ALTER TABLE delivery DISABLE TRIGGER USER;
 
 -- 1. ROLES
 INSERT INTO role (role_id, role_name, description) VALUES
@@ -254,3 +266,32 @@ VALUES
 (3, 2, '2026-03-20', 'SERVICE', 6500.00, 'Routine vehicle servicing'),
 (4, 3, '2026-05-05', 'SERVICE', 15000.00, 'Heavy vehicle maintenance'),
 (5, 4, '2026-08-12', 'INSPECTION', 3000.00, 'Electric vehicle inspection');
+
+
+-- ============================================
+-- Finish: re-enable triggers, advance ID sequences, commit
+-- ============================================
+ALTER TABLE shipment_tracking ENABLE TRIGGER USER;
+ALTER TABLE shipment ENABLE TRIGGER USER;
+ALTER TABLE delivery ENABLE TRIGGER USER;
+
+-- The rows above use fixed IDs, so move every serial/identity sequence past the highest
+-- existing ID. Without this, the next INSERT through the API collides with seeded rows.
+DO $$
+DECLARE r record;
+BEGIN
+  FOR r IN
+    SELECT c.relname AS tbl, a.attname AS col,
+           pg_get_serial_sequence(format('public.%I', c.relname), a.attname) AS seq
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+    WHERE n.nspname = 'public' AND c.relkind = 'r'
+      AND pg_get_serial_sequence(format('public.%I', c.relname), a.attname) IS NOT NULL
+  LOOP
+    EXECUTE format('SELECT setval(%L, COALESCE((SELECT MAX(%I) FROM public.%I), 0) + 1, false)',
+                   r.seq, r.col, r.tbl);
+  END LOOP;
+END $$;
+
+COMMIT;

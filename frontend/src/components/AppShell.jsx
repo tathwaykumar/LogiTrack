@@ -13,6 +13,7 @@ import Analytics from './Analytics.jsx'
 import Profile from './Profile.jsx'
 import Users from './Users.jsx'
 import Shop from './Shop.jsx'
+import Warehouses from './Warehouses.jsx'
 import { Avatar, BrandMark, Icon, Wordmark } from './ui.jsx'
 import { ROLE_NAMES, formatLabel, initials } from '../lib/format.js'
 
@@ -21,6 +22,7 @@ const NAVIGATION = [
   { id: 'shop', label: 'Shop', roles: [4], icon: 'shop', group: 'Commerce' },
   { id: 'orders', label: 'Orders', roles: [1, 2, 4], icon: 'box', group: 'Commerce' },
   { id: 'shipments', label: 'Shipments', roles: [1, 2, 3, 4], icon: 'route', group: 'Logistics' },
+  { id: 'warehouses', label: 'Warehouses', roles: [1, 2], icon: 'building', group: 'Logistics' },
   { id: 'tracking', label: 'Tracking', roles: [1, 2, 3, 4], icon: 'pin', group: 'Logistics' },
   { id: 'deliveries', label: 'Deliveries', roles: [1, 2, 3, 4], icon: 'truck', group: 'Logistics' },
   { id: 'vehicles', label: 'Vehicles', roles: [1, 2], icon: 'vehicle', group: 'Fleet' },
@@ -172,6 +174,8 @@ function AppShell({ session, onLogout }) {
               <Shop {...pageProps} />
             ) : currentPage?.id === 'shipments' ? (
               <Shipments {...pageProps} />
+            ) : currentPage?.id === 'warehouses' ? (
+              <Warehouses {...pageProps} />
             ) : currentPage?.id === 'tracking' ? (
               <Tracking {...pageProps} />
             ) : currentPage?.id === 'deliveries' ? (

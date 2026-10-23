@@ -148,13 +148,15 @@ class Factory:
         customer = self._save(Customer(user_id=user.user_id, name=f"Customer {user.user_id}"))
         return customer, headers
 
-    def warehouse(self, city: str):
+    def warehouse(self, city: str, status: str | None = None, capacity=None):
+        extra = {"status": status} if status else {}
         return self._save(Warehouse(
             warehouse_name=f"{city} Warehouse {self._next()}", address="1 Test Road", city=city,
+            capacity=capacity, **extra,
         ))
 
-    def product(self, price=100):
-        return self._save(Product(product_name=f"Product {self._next()}", unit_price=price))
+    def product(self, price=100, weight=None):
+        return self._save(Product(product_name=f"Product {self._next()}", unit_price=price, weight=weight))
 
     def stock(self, warehouse, product, quantity):
         return self._save(Inventory(
@@ -167,15 +169,15 @@ class Factory:
             distance_km=100, estimated_duration=timedelta(hours=4), route_status=status,
         ))
 
-    def vehicle(self, status="ACTIVE"):
+    def vehicle(self, status="ACTIVE", capacity=1000):
         n = self._next()
         return self._save(Vehicle(
-            registration_no=f"TN-TEST-{n}", vehicle_type="VAN", capacity=1000, status=status,
+            registration_no=f"TN-TEST-{n}", vehicle_type="VAN", capacity=capacity, status=status,
         ))
 
     def driver(
         self, availability="AVAILABLE", employment="ACTIVE", license_expiry=None,
-        vehicle_status="ACTIVE", with_vehicle=True, vehicle=None,
+        vehicle_status="ACTIVE", with_vehicle=True, vehicle=None, vehicle_capacity=1000,
     ):
         user, headers = self.user("DRIVER")
         employee = self._save(Employee(
@@ -188,7 +190,7 @@ class Factory:
             availability_status=availability,
         ))
         if with_vehicle:
-            vehicle = vehicle or self.vehicle(vehicle_status)
+            vehicle = vehicle or self.vehicle(vehicle_status, vehicle_capacity)
             self._save(DriverVehicleAssignment(
                 driver_id=driver.employee_id, vehicle_id=vehicle.vehicle_id,
                 assigned_from=date.today() - timedelta(days=30),

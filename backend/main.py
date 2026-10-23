@@ -1,12 +1,14 @@
+import logging
 import re
 from datetime import date, datetime
 
-from fastapi import Depends, FastAPI, HTTPException, Security
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Security
+from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pwdlib.exceptions import UnknownHashError
 from pydantic import BaseModel, Field
 from sqlalchemy import case, exists, func, or_, select, text
-from sqlalchemy.exc import DBAPIError, IntegrityError
+from sqlalchemy.exc import DataError, DBAPIError, IntegrityError
 from sqlalchemy.orm import Session, aliased
 
 from auth import hash_password, verify_password
@@ -16,9 +18,17 @@ from models import (
     Invoice, Order, OrderInventoryReservation, OrderItem, Payment, Product,
     Role, Route, Shipment,
     ShipmentItem, ShipmentTracking, User, Vehicle, VehicleMaintenance, Warehouse,
+    OrderFulfilment,
 )
 
 from database import get_db
+from fulfilment import (  # noqa: F401  (several names are re-exported for tests and callers)
+    ACTIVE_WAREHOUSE_STATUS, address_mentions_city, allocate_stock, approve_paid_order, recover_missing_reservation, assign_eligible_driver, awaiting_approval, is_paid, cancel_order,
+    explain_no_assignment, find_eligible_driver, fulfil_paid_order, fulfilment_summary, log_event,
+    lock_allocation, normalise_place, order_weight, plan_order, record_assignment, release_abandoned_orders,
+    select_route, validate_manual_assignment,
+)
+import operations
 
 app = FastAPI(title="LogiTrack API")
 security = HTTPBearer()
@@ -70,6 +80,29 @@ def status_conflict_detail(error: Exception) -> str:
     return getattr(diag, "message_primary", None) or "This status change is not allowed."
 
 
+def driver_employee_id(db: Session, user_id: int):
+    employee = db.query(Employee).filter(Employee.user_id == user_id).first()
+    return employee.employee_id if employee else None
+
+
+def driver_has_shipment(db: Session, user_id: int, shipment_id: int) -> bool:
+    employee_id = driver_employee_id(db, user_id)
+    return employee_id is not None and db.query(Delivery.delivery_id).filter(
+        Delivery.shipment_id == shipment_id, Delivery.driver_id == employee_id
+    ).first() is not None
+
+
+def driver_has_order(db: Session, user_id: int, order_id: int) -> bool:
+    employee_id = driver_employee_id(db, user_id)
+    return employee_id is not None and (
+        db.query(Delivery.delivery_id)
+        .join(Shipment, Shipment.shipment_id == Delivery.shipment_id)
+        .filter(Shipment.order_id == order_id, Delivery.driver_id == employee_id)
+        .first()
+        is not None
+    )
+
+
 def lock_shipment(db: Session, shipment_id: int):
     """Lock the shipment row so concurrent status updates are serialised."""
     return (
@@ -115,6 +148,47 @@ def commit_status_change(db: Session):
         if is_status_conflict(error):
             raise HTTPException(status_code=409, detail=status_conflict_detail(error))
         raise
+
+# PostgreSQL error classes mapped to HTTP statuses, so a bad foreign key, a duplicate value or an
+# out-of-range value reaches the client as a clear 4xx instead of an unhandled 500.
+PG_ERROR_RESPONSES = {
+    "23505": (409, "A record with this value already exists"),
+    "23503": (422, "A referenced record does not exist, or the record is still in use"),
+    "23514": (422, "A value is not allowed by the database rules"),
+    "23502": (422, "A required value is missing"),
+}
+
+
+def _database_error_response(error: DBAPIError, status_code: int, message: str):
+    diag = getattr(getattr(error, "orig", None), "diag", None)
+    constraint = getattr(diag, "constraint_name", None)
+    return JSONResponse(
+        status_code=status_code,
+        content={"detail": f"{message} (rule: {constraint})" if constraint else message},
+    )
+
+
+@app.exception_handler(IntegrityError)
+async def integrity_error_handler(request: Request, error: IntegrityError):
+    pgcode = getattr(getattr(error, "orig", None), "pgcode", None)
+    if pgcode == STATUS_CONFLICT_SQLSTATE:
+        return JSONResponse(status_code=409, content={"detail": status_conflict_detail(error)})
+    status_code, message = PG_ERROR_RESPONSES.get(pgcode, (409, "The change conflicts with existing data"))
+    return _database_error_response(error, status_code, message)
+
+
+@app.exception_handler(DataError)
+async def data_error_handler(request: Request, error: DataError):
+    return _database_error_response(error, 422, "A value has an invalid format or is out of range")
+
+
+@app.exception_handler(DBAPIError)
+async def database_error_handler(request: Request, error: DBAPIError):
+    if is_status_conflict(error):
+        return JSONResponse(status_code=409, content={"detail": status_conflict_detail(error)})
+    logging.getLogger("uvicorn.error").error("Unhandled database error", exc_info=error)
+    return JSONResponse(status_code=500, content={"detail": "A database error occurred"})
+
 
 def get_current_user(
     credentials: HTTPAuthorizationCredentials = Security(security)
@@ -182,6 +256,9 @@ class ShopCheckoutItem(BaseModel):
 class ShopCheckoutRequest(BaseModel):
     items: list[ShopCheckoutItem] = Field(min_length=1, max_length=50)
     shipping_address: str = Field(min_length=1, max_length=255)
+    # Optional free-text city. Only used to match an informational route (never required); older clients
+    # omit it.
+    destination_city: str | None = Field(default=None, max_length=100)
 
     class Config:
         extra = "forbid"
@@ -344,7 +421,7 @@ def get_customers(
         for customer in customers
     ]
 
-@app.get("/customers/{customer_id}")
+@app.get("/customers/{customer_id:int}")
 def get_customer(
     customer_id: int,
     current_user: dict = Depends(require_roles("ADMIN", "OPERATIONS_MANAGER")),
@@ -357,7 +434,7 @@ def get_customer(
     )
 
     if not customer:
-        return {"error": "Customer not found"}
+        raise HTTPException(status_code=404, detail="Customer not found")
 
     return {
         "customer_id": customer.customer_id,
@@ -398,6 +475,25 @@ def get_orders(
 
     result = []
 
+    order_ids = [o.order_id for o in orders]
+    plans = {
+        plan.order_id: plan
+        for plan in db.query(OrderFulfilment).filter(OrderFulfilment.order_id.in_(order_ids))
+    } if order_ids else {}
+    payment_rows = {
+        pay.order_id: pay for pay in db.query(Payment).filter(Payment.order_id.in_(order_ids))
+    } if order_ids else {}
+    payment_statuses = {oid: pay.payment_status for oid, pay in payment_rows.items()}
+    order_shipments: dict[int, Shipment] = {}
+    for sh in (db.query(Shipment).filter(Shipment.order_id.in_(order_ids))
+               .order_by(Shipment.shipment_status == "CANCELLED", Shipment.shipment_id.desc()) if order_ids else []):
+        order_shipments.setdefault(sh.order_id, sh)
+    order_deliveries = {
+        d.shipment_id: d for d in db.query(Delivery).filter(
+            Delivery.shipment_id.in_([sh.shipment_id for sh in order_shipments.values()]))
+    } if order_shipments else {}
+    is_staff = role.role_name in ["ADMIN", "OPERATIONS_MANAGER"]
+
     for order in orders:
         items = (
             db.query(OrderItem, Product)
@@ -414,6 +510,16 @@ def get_orders(
             "customer_id": order.customer_id,
             "order_status": order.order_status,
             "shipping_address": order.shipping_address,
+            "order_date": order.order_date,
+            "destination_city": order.destination_city,
+            "payment_status": payment_statuses.get(order.order_id),
+            "stage": operations.order_stage(
+                order, payment_rows.get(order.order_id), plans.get(order.order_id),
+                order_shipments.get(order.order_id),
+                order_deliveries.get(order_shipments[order.order_id].shipment_id) if order.order_id in order_shipments else None),
+            # Planning detail is for staff; a customer sees only the plain-language stage above.
+            "fulfilment_status": plans[order.order_id].fulfilment_status if is_staff and order.order_id in plans else None,
+            "fulfilment_reason": plans[order.order_id].reason_detail if is_staff and order.order_id in plans else None,
             "items": [
                 {
                     "product_id": item.product_id,
@@ -429,7 +535,7 @@ def get_orders(
         })
 
     return result
-@app.get("/orders/{order_id}")
+@app.get("/orders/{order_id:int}")
 def get_order_details(
     order_id: int,
     current_user: dict = Depends(get_current_user),
@@ -474,6 +580,15 @@ def get_order_details(
                 status_code=403,
                 detail="You do not have permission to access this order"
             )
+
+    # DRIVER can only access orders they are delivering
+    elif role.role_name == "DRIVER" and not driver_has_order(
+        db, current_user["user_id"], order_id
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="You do not have permission to access this order"
+        )
 
     items = db.query(OrderItem).filter(
         OrderItem.order_id == order_id
@@ -728,7 +843,7 @@ def get_shipment_details(
         .join(Order, Shipment.order_id == Order.order_id)
         .join(Customer, Order.customer_id == Customer.customer_id)
         .join(Warehouse, Shipment.warehouse_id == Warehouse.warehouse_id)
-        .join(Route, Shipment.route_id == Route.route_id)
+        .outerjoin(Route, Shipment.route_id == Route.route_id)   # a shipment may have no configured route
         .all()
     )
 
@@ -815,11 +930,32 @@ def get_deliveries(
     else:
         deliveries = db.query(Delivery).all()
 
+    vehicles = {
+        v.vehicle_id: v
+        for v in db.query(Vehicle).filter(
+            Vehicle.vehicle_id.in_([d.vehicle_id for d in deliveries if d.vehicle_id])
+        )
+    } if deliveries else {}
+    drivers = {
+        e.employee_id: e.name
+        for e in db.query(Employee).filter(Employee.employee_id.in_([d.driver_id for d in deliveries]))
+    } if deliveries else {}
+    shipments_by_id = {
+        sh.shipment_id: sh
+        for sh in db.query(Shipment).filter(Shipment.shipment_id.in_([d.shipment_id for d in deliveries]))
+    } if deliveries else {}
     return [
         {
             "delivery_id": delivery.delivery_id,
             "shipment_id": delivery.shipment_id,
+            "order_id": shipments_by_id[delivery.shipment_id].order_id if delivery.shipment_id in shipments_by_id else None,
+            "shipment_status": shipments_by_id[delivery.shipment_id].shipment_status if delivery.shipment_id in shipments_by_id else None,
             "driver_id": delivery.driver_id,
+            "driver_name": drivers.get(delivery.driver_id),
+            "vehicle_id": delivery.vehicle_id,
+            "vehicle_registration": vehicles[delivery.vehicle_id].registration_no if delivery.vehicle_id in vehicles else None,
+            "vehicle_type": vehicles[delivery.vehicle_id].vehicle_type if delivery.vehicle_id in vehicles else None,
+            "assigned_at": delivery.assigned_at,
             "delivery_date": delivery.delivery_date,
             "delivery_status": delivery.delivery_status,
             "delivery_address": delivery.delivery_address
@@ -958,7 +1094,9 @@ def get_shop_products(
             Product,
             func.coalesce(func.sum(Inventory.quantity), 0).label("available_stock"),
         )
-        .outerjoin(Inventory, Inventory.product_id == Product.product_id)
+        # Only stock in ACTIVE warehouses can be sold: the same pool checkout reserves from.
+        .outerjoin(Inventory, (Inventory.product_id == Product.product_id) & Inventory.warehouse_id.in_(
+            db.query(Warehouse.warehouse_id).filter(Warehouse.status == ACTIVE_WAREHOUSE_STATUS)))
         .group_by(Product.product_id)
         .order_by(Product.product_name)
         .all()
@@ -1005,63 +1143,19 @@ def checkout_shop_order(
         raise HTTPException(status_code=404, detail="Customer profile not found")
 
     try:
-        product_details = {}
-        inventory_allocations = {}
+        destination_city = (checkout.destination_city or "").strip() or None
 
-        # Lock products and inventory in product/warehouse order. This prevents
-        # two concurrent checkouts from consuming the same remaining stock.
-        for product_id in sorted(requested_quantities):
-            product = (
-                db.query(Product)
-                .filter(Product.product_id == product_id)
-                .with_for_update()
-                .first()
-            )
-            if not product:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Product {product_id} was not found",
-                )
-
-            inventory_rows = (
-                db.query(Inventory)
-                .filter(
-                    Inventory.product_id == product_id,
-                    Inventory.quantity > 0,
-                )
-                .order_by(Inventory.warehouse_id)
-                .with_for_update()
-                .all()
-            )
-            available_stock = sum(row.quantity for row in inventory_rows)
-            required_quantity = requested_quantities[product_id]
-            if available_stock < required_quantity:
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        f"Insufficient stock for {product.product_name}. "
-                        f"Only {available_stock} available."
-                    ),
-                )
-
-            remaining = required_quantity
-            allocations = []
-            for row in inventory_rows:
-                amount = min(row.quantity, remaining)
-                if amount:
-                    allocations.append((row, amount))
-                    remaining -= amount
-                if remaining == 0:
-                    break
-
-            product_details[product_id] = product
-            inventory_allocations[product_id] = allocations
+        # Lock the stock and choose the source warehouse(s) (see fulfilment.allocate_stock).
+        allocation = allocate_stock(db, requested_quantities)
+        product_details = allocation.products
+        inventory_allocations = allocation.allocations
 
         order = Order(
             customer_id=customer.customer_id,
             order_date=datetime.now(),
             order_status="PENDING",
             shipping_address=shipping_address,
+            destination_city=destination_city,
         )
         db.add(order)
         db.flush()
@@ -1115,8 +1209,13 @@ def checkout_shop_order(
             invoice_status="ISSUED",
         )
         db.add(invoice)
+        db.flush()
+
+        # Plan fulfilment in the same transaction. Dispatch (shipment, driver, vehicle) waits for payment.
+        plan = plan_order(db, order, selection_note=allocation.note, actor_user_id=current_user["user_id"])
         db.commit()
         db.refresh(invoice)
+        db.refresh(plan)
     except HTTPException:
         db.rollback()
         raise
@@ -1136,7 +1235,13 @@ def checkout_shop_order(
             "order_id": order.order_id,
             "order_status": order.order_status,
             "shipping_address": order.shipping_address,
+            "destination_city": order.destination_city,
             "items": receipt_items,
+        },
+        # Customers see a stage, not internal planning details (those are in the operations views).
+        "fulfilment": {
+            "stage": "Awaiting payment",
+            "dispatch": "Once your payment is received, your order is reviewed and prepared for delivery.",
         },
         "invoice": {
             "invoice_id": invoice.invoice_id,
@@ -1194,305 +1299,6 @@ def get_shop_payment_orders(
 
 
 SIMULATION_MODE = "DEVELOPMENT_ONLY_SIMULATION"
-DRIVER_AVAILABLE_STATUS = "AVAILABLE"
-# Vehicle status has no CHECK constraint: seed data uses ACTIVE and the
-# vehicle screen uses AVAILABLE for the same "in service" meaning.
-ELIGIBLE_VEHICLE_STATUSES = ("ACTIVE", "AVAILABLE")
-OPEN_DELIVERY_STATUSES = ("PENDING", "OUT_FOR_DELIVERY")
-
-
-def find_eligible_driver(db: Session, today: date):
-    """Return (driver_id, vehicle_id) for the least-loaded eligible driver, or None.
-
-    Eligible means: driver AVAILABLE with an unexpired licence, employee ACTIVE
-    (and login not disabled), and a current vehicle assignment to an in-service
-    vehicle that is not concurrently assigned to a different driver.
-    """
-    other_assignment = aliased(DriverVehicleAssignment)
-    vehicle_shared = exists().where(
-        other_assignment.vehicle_id == DriverVehicleAssignment.vehicle_id,
-        other_assignment.driver_id != DriverVehicleAssignment.driver_id,
-        other_assignment.assigned_from <= today,
-        or_(other_assignment.assigned_to.is_(None), other_assignment.assigned_to >= today),
-    )
-    open_deliveries = (
-        select(func.count(Delivery.delivery_id))
-        .where(
-            Delivery.driver_id == Driver.employee_id,
-            Delivery.delivery_status.in_(OPEN_DELIVERY_STATUSES),
-        )
-        .correlate(Driver)
-        .scalar_subquery()
-    )
-
-    def eligible_query():
-        return (
-            db.query(Driver.employee_id, DriverVehicleAssignment.vehicle_id)
-            .join(Employee, Employee.employee_id == Driver.employee_id)
-            .outerjoin(User, User.user_id == Employee.user_id)
-            .join(DriverVehicleAssignment, DriverVehicleAssignment.driver_id == Driver.employee_id)
-            .join(Vehicle, Vehicle.vehicle_id == DriverVehicleAssignment.vehicle_id)
-            .filter(
-                Driver.availability_status == DRIVER_AVAILABLE_STATUS,
-                Driver.license_expiry >= today,
-                Employee.employment_status == "ACTIVE",
-                or_(Employee.user_id.is_(None), func.coalesce(User.is_active, True)),
-                DriverVehicleAssignment.assigned_from <= today,
-                or_(
-                    DriverVehicleAssignment.assigned_to.is_(None),
-                    DriverVehicleAssignment.assigned_to >= today,
-                ),
-                Vehicle.status.in_(ELIGIBLE_VEHICLE_STATUSES),
-                ~vehicle_shared,
-            )
-        )
-
-    candidates = (
-        eligible_query()
-        .order_by(open_deliveries, Driver.employee_id, DriverVehicleAssignment.vehicle_id)
-        .all()
-    )
-    for driver_id, vehicle_id in candidates:
-        # Lock, then re-check, so a concurrent status change cannot slip
-        # between choosing the driver and recording the delivery.
-        db.query(Driver).filter(Driver.employee_id == driver_id).with_for_update().first()
-        db.query(Vehicle).filter(Vehicle.vehicle_id == vehicle_id).with_for_update().first()
-        still_eligible = eligible_query().filter(
-            Driver.employee_id == driver_id,
-            DriverVehicleAssignment.vehicle_id == vehicle_id,
-        ).first()
-        if still_eligible:
-            return driver_id, vehicle_id
-
-    return None
-
-
-def assign_eligible_driver(db: Session, shipment: Shipment, delivery_address: str):
-    """Create the delivery for a shipment if an eligible driver exists; never fabricate one."""
-    candidate = find_eligible_driver(db, date.today())
-    if not candidate:
-        return None
-
-    driver_id, vehicle_id = candidate
-    delivery = Delivery(
-        shipment_id=shipment.shipment_id,
-        driver_id=driver_id,
-        delivery_address=delivery_address,
-        delivery_status="PENDING",
-    )
-    db.add(delivery)
-    db.flush()
-    return {
-        "delivery_id": delivery.delivery_id,
-        "driver_id": driver_id,
-        "vehicle_id": vehicle_id,
-    }
-
-
-def normalise_place(value: str) -> str:
-    """Lower-case, turn punctuation into spaces, drop trailing PIN/postal digits."""
-    words = re.sub(r"[^\w\s]|_", " ", value.lower()).split()
-    while words and words[-1].isdigit():
-        words.pop()
-    return " ".join(words)
-
-
-def address_mentions_city(shipping_address: str, city: str) -> bool:
-    """True when a comma/line-separated address part ends with the city name.
-
-    Matching whole trailing words means "Flat 3, Chennai - 600040" and
-    "VIT University Vellore" name their city, while a street such as
-    "12 Bangalore Road" does not name Bangalore.
-    """
-    target = normalise_place(city)
-    if not target:
-        return False
-    for part in re.split(r"[,;\n]", shipping_address):
-        segment = normalise_place(part)
-        if segment == target or segment.endswith(" " + target):
-            return True
-    return False
-
-
-def select_route(db: Session, origin_city: str, shipping_address: str):
-    """Return the single active route from the origin city to the destination
-    city named in the shipping address, or None when there is no match or the
-    match is ambiguous. Never falls back to an unrelated route."""
-    routes = (
-        db.query(Route)
-        .filter(
-            func.lower(func.trim(Route.source)) == origin_city.strip().lower(),
-            Route.route_status == "ACTIVE",
-        )
-        .order_by(Route.route_id)
-        .all()
-    )
-    matches = [
-        route for route in routes
-        if address_mentions_city(shipping_address, route.destination)
-    ]
-    return matches[0] if len(matches) == 1 else None
-
-
-def unfulfilled(status: str, message: str):
-    return {
-        "status": status,
-        "message": message,
-        "shipment_id": None,
-        "shipment_status": None,
-        "origin_warehouse_id": None,
-        "driver_id": None,
-        "vehicle_id": None,
-    }
-
-
-def fulfilment_summary(db: Session, order: Order):
-    """Describe the existing fulfilment state of an order without changing it."""
-    shipment = (
-        db.query(Shipment)
-        .filter(
-            Shipment.order_id == order.order_id,
-            Shipment.shipment_status != "CANCELLED",
-        )
-        .first()
-    )
-    if not shipment:
-        return unfulfilled(
-            "NOT_FULFILLED",
-            "No shipment exists for this order yet. Operations follow-up is required.",
-        )
-
-    delivery = db.query(Delivery).filter(Delivery.shipment_id == shipment.shipment_id).first()
-    return {
-        "status": "DRIVER_ASSIGNED" if delivery else "PENDING_ASSIGNMENT",
-        "message": (
-            "Shipment created and driver assigned." if delivery
-            else "Shipment created and awaiting driver assignment."
-        ),
-        "shipment_id": shipment.shipment_id,
-        "shipment_status": shipment.shipment_status,
-        "origin_warehouse_id": shipment.warehouse_id,
-        "driver_id": delivery.driver_id if delivery else None,
-        "vehicle_id": None,
-    }
-
-
-def fulfil_paid_order(db: Session, order: Order):
-    """Create the single shipment for a paid order from its recorded reservations.
-
-    The caller must hold a row lock on the order, which serialises repeated or
-    concurrent requests. Nothing is fabricated: when the sourcing record or a
-    route is missing, the paid order stays CONFIRMED with no shipment so that
-    operations can follow up.
-    """
-    # uq_shipment_order_active also enforces this in the database.
-    active_shipment = db.query(Shipment.shipment_id).filter(
-        Shipment.order_id == order.order_id,
-        Shipment.shipment_status != "CANCELLED",
-    ).first()
-    if active_shipment:
-        return fulfilment_summary(db, order)
-
-    reservations = (
-        db.query(OrderInventoryReservation)
-        .filter(OrderInventoryReservation.order_id == order.order_id)
-        .order_by(OrderInventoryReservation.warehouse_id, OrderInventoryReservation.product_id)
-        .all()
-    )
-    if not reservations:
-        return unfulfilled(
-            "RESERVATION_MISSING",
-            "No inventory reservation is recorded for this order, so no shipment was created. "
-            "Operations follow-up is required.",
-        )
-
-    ordered_quantities = {
-        item.product_id: item.quantity
-        for item in db.query(OrderItem).filter(OrderItem.order_id == order.order_id).all()
-    }
-    reserved_quantities: dict[int, int] = {}
-    units_by_warehouse: dict[int, int] = {}
-    for reservation in reservations:
-        reserved_quantities[reservation.product_id] = (
-            reserved_quantities.get(reservation.product_id, 0) + reservation.reserved_quantity
-        )
-        units_by_warehouse[reservation.warehouse_id] = (
-            units_by_warehouse.get(reservation.warehouse_id, 0) + reservation.reserved_quantity
-        )
-    if reserved_quantities != ordered_quantities:
-        return unfulfilled(
-            "RESERVATION_INCOMPLETE",
-            "Recorded inventory reservations do not match the order items, so no shipment "
-            "was created. Operations follow-up is required.",
-        )
-
-    # The schema allows one origin per shipment; use the warehouse that
-    # supplied the most units. Every source stays recorded in the reservations.
-    origin_id = min(units_by_warehouse, key=lambda wid: (-units_by_warehouse[wid], wid))
-    warehouse = db.query(Warehouse).filter(Warehouse.warehouse_id == origin_id).first()
-    route = select_route(db, warehouse.city, order.shipping_address)
-    if not route:
-        return unfulfilled(
-            "ROUTE_UNAVAILABLE",
-            f"No single active route from {warehouse.city} matches the destination city in "
-            "the shipping address, so no shipment was created. Operations follow-up is required.",
-        )
-
-    now = datetime.now()
-    shipment = Shipment(
-        order_id=order.order_id,
-        warehouse_id=origin_id,
-        route_id=route.route_id,
-        shipment_date=now,
-        estimated_delivery=now + route.estimated_duration if route.estimated_duration else None,
-        shipment_status="CREATED",
-    )
-    db.add(shipment)
-    db.flush()
-
-    for product_id, quantity in sorted(ordered_quantities.items()):
-        db.add(ShipmentItem(
-            shipment_id=shipment.shipment_id,
-            order_id=order.order_id,
-            product_id=product_id,
-            quantity=quantity,
-        ))
-
-    assignment = assign_eligible_driver(db, shipment, order.shipping_address)
-
-    remarks = []
-    if len(units_by_warehouse) > 1:
-        remarks.append(
-            "Consolidated from warehouses "
-            + ", ".join(str(wid) for wid in sorted(units_by_warehouse))
-        )
-    remarks.append("Driver assigned" if assignment else "Awaiting driver assignment")
-    db.add(ShipmentTracking(
-        shipment_id=shipment.shipment_id,
-        status="CREATED",
-        location=f"{warehouse.warehouse_name}, {warehouse.city}"[:150],
-        tracking_timestamp=now,
-        remarks="; ".join(remarks)[:255],
-    ))
-
-    if assignment:
-        order.order_status = "PROCESSING"
-    db.flush()
-
-    return {
-        "status": "DRIVER_ASSIGNED" if assignment else "PENDING_ASSIGNMENT",
-        "message": (
-            "Shipment created and driver assigned." if assignment
-            else "Shipment created. No eligible driver and vehicle are available yet, "
-            "so it is awaiting assignment."
-        ),
-        "shipment_id": shipment.shipment_id,
-        "shipment_status": "CREATED",
-        "origin_warehouse_id": origin_id,
-        "source_warehouse_ids": sorted(units_by_warehouse),
-        "driver_id": assignment["driver_id"] if assignment else None,
-        "vehicle_id": assignment["vehicle_id"] if assignment else None,
-    }
 
 
 @app.post("/shop/payments/simulate")
@@ -1596,9 +1402,11 @@ def simulate_shop_payment(
             order.order_status = "CONFIRMED"
             invoice.invoice_status = "PAID"
             db.flush()
-            # Shipment, items, tracking and driver assignment commit together
-            # with the payment, or not at all.
-            fulfilment = fulfil_paid_order(db, order)
+            # Payment alone never dispatches. The order waits for an Operations Manager to approve it
+            # (POST /operations/orders/{id}/approve); only then is a shipment and a driver allocated.
+            log_event(db, order.order_id, "PAID", "Payment succeeded; awaiting operations approval.",
+                      actor_user_id=current_user["user_id"])
+            fulfilment = awaiting_approval()
         else:
             if order.order_status != "PENDING":
                 raise HTTPException(
@@ -1672,7 +1480,7 @@ def assign_shipment_driver(
                 "shipment_id": shipment_id,
                 "delivery_id": existing.delivery_id,
                 "driver_id": existing.driver_id,
-                "vehicle_id": None,
+                "vehicle_id": existing.vehicle_id,
                 "order_id": order.order_id,
                 "order_status": order.order_status,
             }
@@ -1688,15 +1496,17 @@ def assign_shipment_driver(
                 detail="This order cannot be assigned a driver in its current status",
             )
 
-        assignment = assign_eligible_driver(db, shipment, order.shipping_address)
+        weight, _unknown = order_weight(db, order.order_id)
+        assignment = assign_eligible_driver(
+            db, shipment, order.shipping_address, weight_kg=weight, actor_user_id=current_user["user_id"]
+        )
         if not assignment:
             raise HTTPException(
                 status_code=409,
-                detail="No eligible driver and vehicle are available. The shipment remains awaiting assignment.",
+                detail=explain_no_assignment(db, date.today(), weight) + " The shipment remains awaiting assignment.",
             )
 
-        if order.order_status == "CONFIRMED":
-            order.order_status = "PROCESSING"
+        record_assignment(db, order, shipment, actor_user_id=current_user["user_id"])
         db.commit()
     except HTTPException:
         db.rollback()
@@ -1718,6 +1528,358 @@ def assign_shipment_driver(
         "order_id": order.order_id,
         "order_status": order.order_status,
     }
+
+
+# ---------------------------------------------------------------------------------------------
+# Fulfilment: service areas, cancellation, order tracking and the operations desk
+# ---------------------------------------------------------------------------------------------
+STAFF_ROLES = ("ADMIN", "OPERATIONS_MANAGER")
+
+
+def role_name_of(db: Session, current_user: dict) -> str | None:
+    role = db.query(Role).filter(Role.role_id == current_user["role_id"]).first()
+    return role.role_name if role else None
+
+
+def customer_of(db: Session, current_user: dict) -> Customer:
+    customer = db.query(Customer).filter(Customer.user_id == current_user["user_id"]).first()
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer profile not found")
+    return customer
+
+
+@app.post("/orders/{order_id}/cancel")
+def cancel_order_endpoint(
+    order_id: int,
+    current_user: dict = Depends(require_roles("ADMIN", "OPERATIONS_MANAGER", "CUSTOMER")),
+    db: Session = Depends(get_db),
+):
+    """Cancel an unpaid order and return its reserved stock to inventory (exactly once).
+
+    A customer can cancel only their own order. Paid or already-dispatched orders cannot be cancelled
+    here (409); repeating the call on a cancelled order is a harmless no-op.
+    """
+    role = role_name_of(db, current_user)
+    try:
+        order = db.query(Order).filter(Order.order_id == order_id).with_for_update().first()
+        if not order:
+            raise HTTPException(status_code=404, detail="Order not found")
+        if role == "CUSTOMER" and order.customer_id != customer_of(db, current_user).customer_id:
+            raise HTTPException(status_code=403, detail="You do not have permission to access this order")
+        outcome = cancel_order(
+            db, order, actor_user_id=current_user["user_id"],
+            reason="CUSTOMER_REQUEST" if role == "CUSTOMER" else "STAFF_REQUEST",
+        )
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    return {
+        "message": "Order was already cancelled" if outcome["already_cancelled"] else "Order cancelled and reserved stock released",
+        "order_id": order_id,
+        "order_status": "CANCELLED",
+        "already_cancelled": outcome["already_cancelled"],
+        "units_released": outcome["units_released"],
+    }
+
+
+@app.get("/orders/{order_id}/tracking")
+def get_order_tracking(
+    order_id: int,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """The order's full journey: payment, fulfilment plan, warehouse, route, assignment, milestones and
+    tracking events. Customers see only their own orders and drivers only orders they deliver."""
+    order = db.query(Order).filter(Order.order_id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    role = role_name_of(db, current_user)
+    if role == "CUSTOMER":
+        if order.customer_id != customer_of(db, current_user).customer_id:
+            raise HTTPException(status_code=403, detail="You do not have permission to access this order")
+        audience = "customer"
+    elif role == "DRIVER":
+        if not driver_has_order(db, current_user["user_id"], order_id):
+            raise HTTPException(status_code=403, detail="You do not have permission to access this order")
+        audience = "driver"
+    elif role in STAFF_ROLES:
+        audience = "staff"
+    else:
+        raise HTTPException(status_code=403, detail="You do not have permission to access this resource")
+    return operations.order_tracking_view(db, order, audience)
+
+
+@app.get("/operations/summary")
+def get_operations_summary(
+    current_user: dict = Depends(require_roles("ADMIN", "OPERATIONS_MANAGER")),
+    db: Session = Depends(get_db),
+):
+    return operations.operations_summary(db)
+
+
+@app.get("/operations/warehouses")
+def get_operations_warehouses(
+    current_user: dict = Depends(require_roles("ADMIN", "OPERATIONS_MANAGER")),
+    db: Session = Depends(get_db),
+):
+    """Every warehouse with stock, reservations, capacity, shipments and orders in fulfilment."""
+    return operations.warehouse_overview(db)
+
+
+@app.get("/operations/shipments")
+def get_operations_shipments(
+    q: str | None = None,
+    status: str | None = None,
+    warehouse_id: int | None = None,
+    assignment: str | None = Query(default=None, pattern="^(assigned|unassigned)$"),
+    delayed: bool | None = None,
+    sort: str = "shipment_id",
+    direction: str = Query(default="desc", pattern="^(asc|desc)$"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=25, ge=1, le=100),
+    current_user: dict = Depends(require_roles("ADMIN", "OPERATIONS_MANAGER")),
+    db: Session = Depends(get_db),
+):
+    if status and status.upper() not in TRACKING_STATUSES:
+        raise HTTPException(status_code=422, detail="Invalid shipment status")
+    return operations.shipment_rows(
+        db, q=q, status=status, warehouse_id=warehouse_id, assignment=assignment, delayed=delayed,
+        sort=sort, direction=direction, page=page, page_size=page_size,
+    )
+
+
+@app.get("/operations/orders")
+def get_operations_orders(
+    stage: str = Query(default="attention", pattern="^(attention|awaiting_approval|awaiting_payment|all)$"),
+    q: str | None = None,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=25, ge=1, le=100),
+    current_user: dict = Depends(require_roles("ADMIN", "OPERATIONS_MANAGER")),
+    db: Session = Depends(get_db),
+):
+    """Orders for the operations desk. 'attention' = fulfilment blocked, or paid but not shipped."""
+    return operations.order_rows(db, stage=stage, q=q, page=page, page_size=page_size)
+
+
+@app.get("/operations/shipments/{shipment_id}")
+def get_operations_shipment(
+    shipment_id: int,
+    current_user: dict = Depends(require_roles("ADMIN", "OPERATIONS_MANAGER")),
+    db: Session = Depends(get_db),
+):
+    shipment = db.query(Shipment).filter(Shipment.shipment_id == shipment_id).first()
+    if not shipment:
+        raise HTTPException(status_code=404, detail="Shipment not found")
+    order = db.query(Order).filter(Order.order_id == shipment.order_id).first()
+    return operations.order_tracking_view(db, order, "staff", shipment_id=shipment_id)
+
+
+@app.get("/operations/shipments/{shipment_id}/assignment-options")
+def get_assignment_options(
+    shipment_id: int,
+    current_user: dict = Depends(require_roles("ADMIN", "OPERATIONS_MANAGER")),
+    db: Session = Depends(get_db),
+):
+    """Every driver and vehicle pair, with whether it can take this shipment and why not."""
+    shipment = db.query(Shipment).filter(Shipment.shipment_id == shipment_id).first()
+    if not shipment:
+        raise HTTPException(status_code=404, detail="Shipment not found")
+    return operations.assignment_options(db, shipment)
+
+
+class AssignmentRequest(BaseModel):
+    driver_id: int = Field(gt=0)
+    vehicle_id: int | None = Field(default=None, gt=0)
+
+    class Config:
+        extra = "forbid"
+
+
+@app.post("/shipments/{shipment_id}/assignment")
+def assign_shipment_manually(
+    shipment_id: int,
+    request: AssignmentRequest,
+    current_user: dict = Depends(require_roles("ADMIN", "OPERATIONS_MANAGER")),
+    db: Session = Depends(get_db),
+):
+    """Assign or reassign the driver and vehicle of a shipment.
+
+    The choice must satisfy the same rules as automatic assignment (driver available and licensed, vehicle
+    in service and assigned to that driver, driver load limit, vehicle capacity). Only paid orders can be
+    dispatched, and a delivery can be reassigned only while it is still PENDING.
+    """
+    try:
+        shipment = db.query(Shipment).filter(Shipment.shipment_id == shipment_id).first()
+        if not shipment:
+            raise HTTPException(status_code=404, detail="Shipment not found")
+        order = db.query(Order).filter(Order.order_id == shipment.order_id).with_for_update().first()
+        shipment = lock_shipment(db, shipment_id)
+
+        if shipment.shipment_status not in ("CREATED", "PICKED_UP", "IN_TRANSIT"):
+            raise HTTPException(status_code=409, detail=f"A {shipment.shipment_status} shipment can no longer be assigned or reassigned.")
+        if order.order_status == "CANCELLED":
+            raise HTTPException(status_code=409, detail="This order is cancelled.")
+        paid = db.query(Payment.payment_id).filter(Payment.order_id == order.order_id, Payment.payment_status == "SUCCESS").first()
+        if not paid:
+            raise HTTPException(status_code=409, detail="Payment has not succeeded for this order, so it cannot be dispatched.")
+        existing = db.query(Delivery).filter(Delivery.shipment_id == shipment_id).with_for_update().first()
+        if existing and existing.delivery_status != "PENDING":
+            raise HTTPException(status_code=409, detail=f"The delivery is {existing.delivery_status}; it can only be reassigned while PENDING.")
+
+        weight, _unknown = order_weight(db, order.order_id)
+        lock_allocation(db)
+        pair = validate_manual_assignment(
+            db, request.driver_id, request.vehicle_id, weight, existing.delivery_id if existing else None
+        )
+        db.query(Driver).filter(Driver.employee_id == pair.driver_id).with_for_update().first()
+        db.query(Vehicle).filter(Vehicle.vehicle_id == pair.vehicle_id).with_for_update().first()
+
+        if existing and existing.driver_id == pair.driver_id and existing.vehicle_id == pair.vehicle_id:
+            db.rollback()
+            return {"message": "That driver and vehicle are already assigned", "changed": False,
+                    "shipment_id": shipment_id, "delivery_id": existing.delivery_id,
+                    "driver_id": pair.driver_id, "vehicle_id": pair.vehicle_id}
+        if existing:
+            previous = (existing.driver_id, existing.vehicle_id)
+            existing.driver_id = pair.driver_id
+            existing.vehicle_id = pair.vehicle_id
+            existing.assigned_at = datetime.now()
+            delivery = existing
+            log_event(db, order.order_id, "REASSIGNED",
+                      f"Driver {previous[0]} / vehicle {previous[1]} replaced by driver {pair.driver_id} / vehicle {pair.vehicle_id}.",
+                      shipment_id, current_user["user_id"])
+        else:
+            delivery = Delivery(
+                shipment_id=shipment_id, driver_id=pair.driver_id, vehicle_id=pair.vehicle_id,
+                delivery_address=order.shipping_address, delivery_status="PENDING", assigned_at=datetime.now(),
+            )
+            db.add(delivery)
+            db.flush()
+            log_event(db, order.order_id, "DRIVER_ASSIGNED",
+                      f"Driver {pair.driver_id} and vehicle {pair.vehicle_id} assigned by an operator.",
+                      shipment_id, current_user["user_id"])
+        record_assignment(db, order, shipment, actor_user_id=current_user["user_id"])
+        db.commit()
+        db.refresh(delivery)
+    except HTTPException:
+        db.rollback()
+        raise
+    return {
+        "message": "Driver and vehicle reassigned" if existing else "Driver and vehicle assigned",
+        "changed": True, "shipment_id": shipment_id, "delivery_id": delivery.delivery_id,
+        "driver_id": delivery.driver_id, "driver_name": pair.driver_name,
+        "vehicle_id": delivery.vehicle_id, "vehicle_registration": pair.registration_no,
+    }
+
+
+@app.post("/operations/orders/{order_id}/approve")
+def approve_order(
+    order_id: int,
+    current_user: dict = Depends(require_roles("ADMIN", "OPERATIONS_MANAGER")),
+    db: Session = Depends(get_db),
+):
+    """Approve a successfully paid order. Creates its single shipment and allocates a driver and
+    vehicle when one is eligible; otherwise the shipment waits in a pending-allocation state. Safe to
+    repeat: it never creates a second shipment and never double-books a driver or vehicle."""
+    try:
+        order = db.query(Order).filter(Order.order_id == order_id).with_for_update().first()
+        if not order:
+            raise HTTPException(status_code=404, detail="Order not found")
+        result = approve_paid_order(db, order, actor_user_id=current_user["user_id"])
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    return result
+
+
+class RecoverReservationRequest(BaseModel):
+    confirm_stock_not_deducted: bool = False
+
+    class Config:
+        extra = "forbid"
+
+
+@app.post("/operations/orders/{order_id}/recover-reservation")
+def recover_reservation(
+    order_id: int,
+    body: RecoverReservationRequest,
+    current_user: dict = Depends(require_roles("ADMIN", "OPERATIONS_MANAGER")),
+    db: Session = Depends(get_db),
+):
+    """Reserve stock for a paid order that predates reservations. All-or-nothing; never approves the order
+    or creates a shipment. Repeating it is harmless (the stock is not reserved twice)."""
+    try:
+        order = db.query(Order).filter(Order.order_id == order_id).with_for_update().first()
+        if not order:
+            raise HTTPException(status_code=404, detail="Order not found")
+        result = recover_missing_reservation(
+            db, order, confirm_stock_not_deducted=body.confirm_stock_not_deducted,
+            actor_user_id=current_user["user_id"])
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    return result
+
+
+@app.post("/operations/orders/{order_id}/retry-fulfilment")
+def retry_fulfilment(
+    order_id: int,
+    current_user: dict = Depends(require_roles("ADMIN", "OPERATIONS_MANAGER")),
+    db: Session = Depends(get_db),
+):
+    """Re-run planning for an order that is blocked or waiting, for example after a route or
+    driver became available. Paid orders are dispatched; unpaid orders are only re-planned."""
+    try:
+        order = db.query(Order).filter(Order.order_id == order_id).with_for_update().first()
+        if not order:
+            raise HTTPException(status_code=404, detail="Order not found")
+        if order.order_status == "CANCELLED":
+            raise HTTPException(status_code=409, detail="This order is cancelled.")
+        paid = db.query(Payment.payment_id).filter(Payment.order_id == order_id, Payment.payment_status == "SUCCESS").first()
+        shipment = db.query(Shipment).filter(Shipment.order_id == order_id, Shipment.shipment_status != "CANCELLED").first()
+        plan_row = db.query(OrderFulfilment).filter(OrderFulfilment.order_id == order_id).first()
+        if paid and shipment is None:
+            if plan_row is None or plan_row.approved_at is None:
+                raise HTTPException(status_code=409, detail="This paid order has not been approved yet. Approve it first.")
+            result = fulfil_paid_order(db, order, actor_user_id=current_user["user_id"])
+        elif paid and shipment is not None and db.query(Delivery.delivery_id).filter(Delivery.shipment_id == shipment.shipment_id).first() is None:
+            lock_shipment(db, shipment.shipment_id)
+            weight, _unknown = order_weight(db, order_id)
+            assignment = assign_eligible_driver(db, shipment, order.shipping_address, weight_kg=weight,
+                                                actor_user_id=current_user["user_id"])
+            if assignment:
+                record_assignment(db, order, shipment, actor_user_id=current_user["user_id"])
+            result = fulfilment_summary(db, order)
+            if not assignment:
+                result["message"] = explain_no_assignment(db, date.today(), weight)
+        elif shipment is not None:
+            result = fulfilment_summary(db, order)
+        else:
+            plan = plan_order(db, order, actor_user_id=current_user["user_id"])
+            result = {"status": plan.fulfilment_status,
+                      "message": plan.reason_detail or "Planning is up to date; dispatch waits for payment.",
+                      "reason_code": plan.reason_code}
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    return result
+
+
+@app.post("/operations/release-abandoned")
+def release_abandoned(
+    older_than_minutes: int | None = Query(default=None, ge=1),
+    current_user: dict = Depends(require_roles("ADMIN", "OPERATIONS_MANAGER")),
+    db: Session = Depends(get_db),
+):
+    """Cancel unpaid orders older than the limit and return their stock. The default limit is
+    UNPAID_ORDER_TTL_MINUTES (24 hours unless configured)."""
+    released = release_abandoned_orders(db, older_than_minutes, actor_user_id=current_user["user_id"])
+    db.commit()
+    return {"orders_cancelled": len(released), "units_released": sum(r["units_released"] for r in released), "orders": released}
 
 
 @app.get("/warehouses")
@@ -2009,7 +2171,7 @@ def update_shipment_status(
 class ShipmentCreate(BaseModel):
     order_id: int
     warehouse_id: int
-    route_id: int
+    route_id: int | None = None   # optional: a route is reference data, not a prerequisite (migration 007)
     estimated_delivery: datetime | None = None
 @app.post("/shipments")
 def create_shipment(
@@ -2028,6 +2190,13 @@ def create_shipment(
     if not order:
         db.rollback()
         raise HTTPException(status_code=404, detail="Order not found")
+    # Same gate as POST /operations/orders/{id}/approve: only a paid, uncancelled order can be dispatched.
+    if order.order_status == "CANCELLED":
+        db.rollback()
+        raise HTTPException(status_code=409, detail="This order is cancelled.")
+    if not is_paid(db, order.order_id):
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Payment has not succeeded for this order, so a shipment cannot be created.")
 
     new_shipment = Shipment(
         order_id=shipment.order_id,
@@ -2038,6 +2207,13 @@ def create_shipment(
 
     db.add(new_shipment)
     try:
+        # Creating the shipment by hand is itself an operations approval; record it if none exists yet.
+        plan = db.query(OrderFulfilment).filter(OrderFulfilment.order_id == order.order_id).first()
+        if plan is not None and plan.approved_at is None:
+            plan.approved_at = datetime.now()
+            plan.approved_by_user_id = current_user["user_id"]
+            log_event(db, order.order_id, "APPROVED", "Order approved by creating its shipment manually.",
+                      actor_user_id=current_user["user_id"])
         db.commit()
     except IntegrityError as error:
         db.rollback()
@@ -2528,7 +2704,8 @@ def create_route(
         "source": new_route.source,
         "destination": new_route.destination,
         "distance_km": new_route.distance_km,
-        "estimated_duration": new_route.estimated_duration,
+        "estimated_duration": str(new_route.estimated_duration)
+        if new_route.estimated_duration else None,
         "route_status": new_route.route_status
     }
 class DriverCreate(BaseModel):
@@ -2672,7 +2849,7 @@ def update_order_status(
     order = db.query(Order).filter(Order.order_id == order_id).first()
 
     if not order:
-        return {"error": "Order not found"}
+        raise HTTPException(status_code=404, detail="Order not found")
 
     order.order_status = data.order_status
 
@@ -2700,7 +2877,7 @@ def update_payment_status(
     ).first()
 
     if not payment:
-        return {"error": "Payment not found"}
+        raise HTTPException(status_code=404, detail="Payment not found")
 
     payment.payment_status = data.payment_status
 
@@ -2810,7 +2987,7 @@ def update_inventory(
     ).first()
 
     if not inventory:
-        return {"error": "Inventory record not found"}
+        raise HTTPException(status_code=404, detail="Inventory record not found")
 
     inventory.quantity = data.quantity
 
@@ -2843,7 +3020,7 @@ def update_vehicle_status(
     ).first()
 
     if not vehicle:
-        return {"error": "Vehicle not found"}
+        raise HTTPException(status_code=404, detail="Vehicle not found")
 
     vehicle.status = data.status
 
@@ -2871,7 +3048,7 @@ def update_driver_status(
     ).first()
 
     if not driver:
-        return {"error": "Driver not found"}
+        raise HTTPException(status_code=404, detail="Driver not found")
 
     role = db.query(Role).filter(
         Role.role_id == current_user["role_id"]
@@ -2912,7 +3089,7 @@ def update_employee_status(
     ).first()
 
     if not employee:
-        return {"error": "Employee not found"}
+        raise HTTPException(status_code=404, detail="Employee not found")
 
     employee.employment_status = data.employment_status
 
@@ -2938,7 +3115,7 @@ def update_warehouse_status(
     ).first()
 
     if not warehouse:
-        return {"error": "Warehouse not found"}
+        raise HTTPException(status_code=404, detail="Warehouse not found")
 
     warehouse.status = data.status
 
@@ -2964,7 +3141,7 @@ def update_product_price(
     ).first()
 
     if not product:
-        return {"error": "Product not found"}
+        raise HTTPException(status_code=404, detail="Product not found")
 
     product.unit_price = data.unit_price
 
@@ -2993,7 +3170,7 @@ def update_invoice_status(
     ).first()
 
     if not invoice:
-        return {"error": "Invoice not found"}
+        raise HTTPException(status_code=404, detail="Invoice not found")
 
     invoice.invoice_status = data.invoice_status
 
@@ -3019,7 +3196,7 @@ def update_route_status(
     ).first()
 
     if not route:
-        return {"error": "Route not found"}
+        raise HTTPException(status_code=404, detail="Route not found")
 
     route.route_status = data.route_status
 
@@ -3042,7 +3219,7 @@ def get_order_summary(
     ).first()
 
     if not order:
-        return {"error": "Order not found"}
+        raise HTTPException(status_code=404, detail="Order not found")
 
     items = db.query(OrderItem).filter(
         OrderItem.order_id == order_id
@@ -3168,7 +3345,7 @@ def get_order_financial_summary(
     ).first()
 
     if not order:
-        return {"error": "Order not found"}
+        raise HTTPException(status_code=404, detail="Order not found")
 
     payment = db.query(Payment).filter(
         Payment.order_id == order_id
@@ -3547,7 +3724,7 @@ def get_customer_order_history(
     ).first()
 
     if not customer:
-        return {"error": "Customer not found"}
+        raise HTTPException(status_code=404, detail="Customer not found")
 
     results = db.query(
         Order.order_id,
@@ -3636,6 +3813,15 @@ def get_tracking_details(
                 status_code=403,
                 detail="You do not have permission to access this shipment"
             )
+
+    # DRIVER can only view shipments assigned to them
+    elif role.role_name == "DRIVER" and not driver_has_shipment(
+        db, current_user["user_id"], shipment_id
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="You do not have permission to access this shipment"
+        )
 
     route = db.query(Route).filter(
         Route.route_id == shipment.route_id
@@ -3766,6 +3952,17 @@ def search_shipments(
 
         query = query.filter(
             Shipment.order_id.in_(customer_orders)
+        )
+
+    # DRIVER can only see shipments assigned to them
+    elif role.role_name == "DRIVER":
+        employee_id = driver_employee_id(db, current_user["user_id"])
+        if employee_id is None:
+            raise HTTPException(status_code=404, detail="Driver profile not found")
+        query = query.filter(
+            Shipment.shipment_id.in_(
+                db.query(Delivery.shipment_id).filter(Delivery.driver_id == employee_id)
+            )
         )
 
     # Optional filters

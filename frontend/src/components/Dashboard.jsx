@@ -57,7 +57,9 @@ async function optional(promise) {
 async function getDashboardData(roleId, token) {
   if (roleId === 1 || roleId === 2) {
     const [summary, shipments, deliveries, shipmentStatus] = await Promise.all([apiGet('/dashboard/summary', token), apiGet('/shipments', token), apiGet('/deliveries', token), apiGet('/analytics/shipment-status', token)])
-    const [orderStatus, revenue, deliveryPerformance, topProducts, lowStock] = await Promise.all([
+    const [operations, warehouses, orderStatus, revenue, deliveryPerformance, topProducts, lowStock] = await Promise.all([
+      optional(apiGet('/operations/summary', token)),
+      optional(apiGet('/operations/warehouses', token)),
       optional(apiGet('/analytics/order-status', token)),
       optional(apiGet('/analytics/revenue', token)),
       optional(apiGet('/analytics/delivery-performance', token)),
@@ -67,6 +69,8 @@ async function getDashboardData(roleId, token) {
     return {
       kind: 'operations',
       summary,
+      operations,
+      warehouses: Array.isArray(warehouses) ? warehouses : null,
       inMotion: shipments.filter((item) => !CLOSED.includes(item.shipment_status)).length,
       shipmentStages: toStages(shipmentStatus, SHIPMENT_STAGES),
       orderStages: Array.isArray(orderStatus) ? toStages(orderStatus, ORDER_STAGES) : null,
@@ -184,6 +188,8 @@ function OperationsDashboard({ data, name, roleId, onNavigate }) {
         <StatTile label="Revenue collected" value={revenue ? formatCurrency(revenue.total_revenue) : '—'} hint={revenue ? `${formatCurrency(revenue.total_invoiced)} invoiced` : 'Revenue data unavailable'} icon="wallet" tone="ink" style={stagger(5)} />
       </section>
 
+      {data.operations && <FulfilmentSection operations={data.operations} warehouses={data.warehouses} onNavigate={onNavigate} />}
+
       <section className="grid gap-6 xl:grid-cols-2">
         <Panel eyebrow="Logistics" title="Shipments by stage" subtitle="Ordered from creation to delivery" style={stagger(2)}>
           <BarList items={data.shipmentStages} caption="Shipments by stage" />
@@ -229,6 +235,43 @@ function OperationsDashboard({ data, name, roleId, onNavigate }) {
         <ActivityPanel activities={data.activities} style={stagger(4)} />
       </section>
     </div>
+  )
+}
+
+function FulfilmentSection({ operations, warehouses, onNavigate }) {
+  const { orders, shipments, fleet, data_consistency: consistency } = operations
+  const go = (page) => onNavigate && (() => onNavigate(page))
+  return (
+    <section className="space-y-4" aria-label="Fulfilment">
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <StatTile label="Awaiting payment" value={formatNumber(orders.awaiting_payment)} hint="Stock reserved, nothing dispatched" icon="card" style={stagger(2)} />
+        <StatTile label="Awaiting approval" value={formatNumber(orders.awaiting_approval)} hint={`${formatNumber(orders.awaiting_fulfilment)} approved, not shipped · ${formatNumber(orders.blocked)} blocked`} icon="alert" tone="cream" style={stagger(3)} />
+        <StatTile label="Awaiting driver" value={formatNumber(shipments.awaiting_assignment)} hint={`${formatNumber(fleet.drivers_available)} eligible drivers · ${formatNumber(fleet.vehicles_available)} vehicles free`} icon="users" tone="lime" style={stagger(4)} />
+        <StatTile label="Delayed" value={formatNumber(shipments.delayed)} hint={`${formatNumber(shipments.in_transit)} in transit · ${formatNumber(shipments.delivered)} delivered`} icon="clock" tone="ink" style={stagger(5)} />
+      </div>
+      {consistency?.order_shipment_mismatches > 0 && (
+        <p className="rounded-2xl border border-line bg-warn-soft/50 px-4 py-3 text-sm text-warn">
+          {consistency.order_shipment_mismatches} older order(s) disagree with their shipment (orders {consistency.order_ids.join(', ')}). {consistency.note}
+        </p>
+      )}
+      {warehouses?.length > 0 && (
+        <Panel eyebrow="Warehouses" title="Network at a glance" subtitle="Reserved stock and open shipments per site" actions={onNavigate && <button type="button" onClick={go('warehouses')} className="btn btn-ghost">All warehouses <Icon name="arrowRight" className="size-4" /></button>}>
+          <ul className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+            {warehouses.map((w) => (
+              <li key={w.warehouse_id} className="rounded-2xl border border-line bg-paper p-4">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="truncate font-semibold">{w.warehouse_name}</p>
+                  <StatusBadge status={w.status} label={w.status ?? 'Unknown'} />
+                </div>
+                <p className="text-xs text-stone">{w.city}</p>
+                <p className="mt-3 text-sm text-graphite">{formatNumber(w.units_available)} available · {formatNumber(w.units_reserved)} reserved · {w.outgoing_shipments.awaiting_pickup + w.outgoing_shipments.in_flight} open shipments</p>
+                {w.utilisation_percent !== null && <div className="mt-3"><Meter label="Capacity used" value={w.utilisation_percent} detail={`${formatNumber(w.units_on_hand)} of ${formatNumber(w.capacity)}`} /></div>}
+              </li>
+            ))}
+          </ul>
+        </Panel>
+      )}
+    </section>
   )
 }
 

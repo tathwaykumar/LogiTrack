@@ -1,10 +1,19 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { ApiError, apiGet } from '../services/apiClient.js'
+import { ApiError, apiGet, apiPost, apiPut } from '../services/apiClient.js'
 import { formatDate } from '../lib/format.js'
 import { DELIVERY_GROUPS, deliveryGroupId, deliveryStatus, summariseDeliveries } from '../lib/status.js'
-import { EmptyState, ErrorState, Icon, PageHeader, RefreshButton, SearchField, StatTile, StatusBadge, stagger } from './ui.jsx'
+import OrderTracker from './OrderTracker.jsx'
+import { Drawer, EmptyState, ErrorState, Icon, Notice, PageHeader, RefreshButton, SearchField, StatTile, StatusBadge, stagger } from './ui.jsx'
 
 const COLUMN_TONES = { pending: 'bg-cream', moving: 'bg-lime', done: 'bg-ok-soft', issues: 'bg-bad-soft' }
+// The backend validates every transition; this only decides which button to offer.
+const NEXT_STEP = {
+  CREATED: { status: 'PICKED_UP', label: 'Mark picked up' },
+  PICKED_UP: { status: 'IN_TRANSIT', label: 'Mark in transit' },
+  IN_TRANSIT: { status: 'OUT_FOR_DELIVERY', label: 'Out for delivery' },
+  OUT_FOR_DELIVERY: { status: 'DELIVERED', label: 'Mark delivered' },
+}
+
 const COLUMNS = DELIVERY_GROUPS.map((group) => ({ ...group, tone: COLUMN_TONES[group.id] }))
 
 function Deliveries({ session, onAuthExpired }) {
@@ -13,6 +22,10 @@ function Deliveries({ session, onAuthExpired }) {
   const [error, setError] = useState('')
   const [search, setSearch] = useState('')
   const [refreshKey, setRefreshKey] = useState(0)
+  const [selected, setSelected] = useState(null)
+  const [busyId, setBusyId] = useState(null)
+  const [notice, setNotice] = useState(null)
+  const isDriver = Number(session.user.roleId) === 3
 
   const loadDeliveries = useCallback(async () => {
     setLoading(true)
@@ -55,6 +68,27 @@ function Deliveries({ session, onAuthExpired }) {
     )
   }, [deliveries, search])
 
+  async function advance(delivery, action) {
+    setBusyId(delivery.delivery_id)
+    setNotice(null)
+    try {
+      if (action === 'FAILED') {
+        await apiPut(`/deliveries/${delivery.delivery_id}/status`, { delivery_status: 'FAILED' }, session.accessToken)
+      } else {
+        await apiPost('/tracking', { shipment_id: delivery.shipment_id, status: action }, session.accessToken)
+      }
+      setRefreshKey((key) => key + 1)
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        onAuthExpired()
+        return
+      }
+      setNotice({ tone: 'error', text: err.message || 'The update was rejected.' })
+    } finally {
+      setBusyId(null)
+    }
+  }
+
   const summary = summariseDeliveries(deliveries)
   const columns = COLUMNS.map((column) => ({
     ...column,
@@ -76,6 +110,8 @@ function Deliveries({ session, onAuthExpired }) {
         <StatTile label="Open" value={summary.open} hint="Pending, out for delivery or failed attempt" icon="clock" tone="lime" loading={loading && !deliveries.length} style={stagger(1)} />
         <StatTile label="Delivered" value={summary.delivered} icon="check" tone="ink" loading={loading && !deliveries.length} style={stagger(2)} />
       </div>
+
+      {notice && <Notice tone={notice.tone}>{notice.text}</Notice>}
 
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <p className="text-sm text-stone" aria-live="polite">{loading ? 'Loading deliveries…' : `${filteredDeliveries.length} of ${deliveries.length} deliveries`}</p>
@@ -120,7 +156,20 @@ function Deliveries({ session, onAuthExpired }) {
                       <div className="flex items-center gap-2"><Icon name="route" className="size-4 text-stone" /><dt className="sr-only">Shipment</dt><dd>Shipment #{delivery.shipment_id ?? '—'}</dd></div>
                       {delivery.delivery_address && <div className="flex items-start gap-2"><Icon name="pin" className="mt-0.5 size-4 text-stone" /><dt className="sr-only">Address</dt><dd className="leading-5">{delivery.delivery_address}</dd></div>}
                       <div className="flex items-center gap-2"><Icon name="calendar" className="size-4 text-stone" /><dt className="sr-only">Delivery date</dt><dd>{formatDate(delivery.actual_delivery_date ?? delivery.delivery_date ?? delivery.scheduled_date, deliveryStatus(delivery) === 'DELIVERED' ? 'Delivery date not recorded' : 'Not delivered yet')}</dd></div>
+                      {(delivery.driver_name || delivery.vehicle_registration) && (
+                        <div className="flex items-center gap-2"><Icon name="truck" className="size-4 text-stone" /><dt className="sr-only">Driver and vehicle</dt><dd>{[delivery.driver_name, delivery.vehicle_registration].filter(Boolean).join(' · ')}{!delivery.vehicle_registration && ' · vehicle not recorded'}</dd></div>
+                      )}
+                      {delivery.assigned_at && <div className="flex items-center gap-2"><Icon name="clock" className="size-4 text-stone" /><dt className="sr-only">Assigned</dt><dd>Assigned {formatDate(delivery.assigned_at)}</dd></div>}
                     </dl>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {isDriver && NEXT_STEP[delivery.shipment_status] && !['DELIVERED', 'CANCELLED'].includes(delivery.delivery_status) && (
+                        <button type="button" className="btn btn-ink py-1.5!" disabled={busyId === delivery.delivery_id} onClick={() => advance(delivery, NEXT_STEP[delivery.shipment_status].status)}>{NEXT_STEP[delivery.shipment_status].label}</button>
+                      )}
+                      {isDriver && delivery.shipment_status === 'OUT_FOR_DELIVERY' && delivery.delivery_status !== 'FAILED' && (
+                        <button type="button" className="btn btn-outline py-1.5!" disabled={busyId === delivery.delivery_id} onClick={() => advance(delivery, 'FAILED')}>Delivery attempt failed</button>
+                      )}
+                      {delivery.order_id && <button type="button" className="btn btn-outline py-1.5!" onClick={() => setSelected(delivery)}>Details</button>}
+                    </div>
                   </li>
                 ))}
                 {column.items.length === 0 && <li className="rounded-2xl border border-dashed border-sand px-4 py-8 text-center text-sm text-mist">Nothing here</li>}
@@ -129,6 +178,10 @@ function Deliveries({ session, onAuthExpired }) {
           ))}
         </div>
       )}
+
+      <Drawer open={Boolean(selected)} onClose={() => setSelected(null)} eyebrow={selected ? `Order #${selected.order_id}` : ''} title={selected ? `Delivery #${selected.delivery_id}` : ''} wide>
+        {selected && <OrderTracker orderId={selected.order_id} session={session} onAuthExpired={onAuthExpired} refreshKey={refreshKey} />}
+      </Drawer>
     </div>
   )
 }

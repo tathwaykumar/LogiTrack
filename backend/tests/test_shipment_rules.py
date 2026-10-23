@@ -12,7 +12,7 @@ from models import (
     Delivery, Inventory, Invoice, Order, OrderInventoryReservation, Payment,
     Shipment,
 )
-from test_fulfilment import checkout, count, pay, run_concurrently, shop, stock_of  # noqa: F401
+from test_fulfilment import checkout, count, pay, pay_only, run_concurrently, shop, stock_of  # noqa: F401
 
 
 def create_shipment(client, headers, order_id, warehouse, route):
@@ -81,13 +81,14 @@ def test_other_shipment_integrity_errors_are_not_reported_as_duplicates(client, 
     response = create_shipment(client, ops, 999999, shop["warehouse"], shop["route"])
     assert response.status_code == 404
 
-    # An unknown route is a foreign-key error, not an active-shipment conflict,
-    # so POST /shipments keeps its previous behaviour for it.
+    # An unknown route is a foreign-key error, not an active-shipment conflict: it is reported as
+    # a 422 about a missing reference, never as the "already has an active shipment" 409.
     order = make.legacy_order(shop["customer"], shop["product"])
+    assert pay_only(client, shop["headers"], order.order_id).status_code == 200    # only paid orders can ship
     shop["route"].route_id = 999999
-    raw_client = TestClient(app, raise_server_exceptions=False)
-    response = create_shipment(raw_client, ops, order.order_id, shop["warehouse"], shop["route"])
-    assert response.status_code == 500
+    response = create_shipment(client, ops, order.order_id, shop["warehouse"], shop["route"])
+    assert response.status_code == 422
+    assert main.ACTIVE_SHIPMENT_CONFLICT not in response.text
     assert count(db, Shipment) == 0
 
 
@@ -120,6 +121,7 @@ def test_cancelled_shipment_can_be_replaced(client, db, shop, ops):
 
 def test_payment_replaces_only_cancelled_shipments(client, db, shop, ops):
     order_id = checkout(client, shop["headers"], [(shop["product"], 1)]).json()["order"]["order_id"]
+    assert pay_only(client, shop["headers"], order_id).status_code == 200
     manual = create_shipment(client, ops, order_id, shop["warehouse"], shop["route"]).json()["shipment_id"]
     assert set_status(client, ops, manual, "CANCELLED").status_code == 200
 
@@ -131,6 +133,7 @@ def test_payment_replaces_only_cancelled_shipments(client, db, shop, ops):
 
 def test_payment_respects_existing_active_shipment(client, db, shop, ops):
     order_id = checkout(client, shop["headers"], [(shop["product"], 1)]).json()["order"]["order_id"]
+    assert pay_only(client, shop["headers"], order_id).status_code == 200
     manual = create_shipment(client, ops, order_id, shop["warehouse"], shop["route"]).json()["shipment_id"]
 
     body = pay(client, shop["headers"], order_id).json()
@@ -142,6 +145,7 @@ def test_payment_respects_existing_active_shipment(client, db, shop, ops):
 def test_concurrent_shipment_creation_allows_one(db, shop, ops):
     with TestClient(app) as c:
         order_id = checkout(c, shop["headers"], [(shop["product"], 1)]).json()["order"]["order_id"]
+        assert pay_only(c, shop["headers"], order_id).status_code == 200
 
     def attempt():
         with TestClient(app) as c:
@@ -236,7 +240,7 @@ def test_duplicate_active_routes_are_ambiguous(db, make, routes):
     "12 Bangalore Road",
     "Hosur Industrial Estate, Hosur",
 ])
-def test_unmatched_route_leaves_paid_order_pending_for_operations(client, db, make, address):
+def test_unmatched_route_does_not_hold_back_a_paid_order(client, db, make, address):
     customer, headers = make.customer()
     warehouse = make.warehouse("Vellore")
     product = make.product()
@@ -249,39 +253,10 @@ def test_unmatched_route_leaves_paid_order_pending_for_operations(client, db, ma
     order_id = checkout(client, headers, [(product, 2)], address=address).json()["order"]["order_id"]
     body = pay(client, headers, order_id).json()
 
-    assert body["fulfilment"]["status"] == "ROUTE_UNAVAILABLE"
-    assert body["payment_status"] == "SUCCESS"
-    assert body["invoice_status"] == "PAID"
-    assert body["order_status"] == "CONFIRMED"
-    assert count(db, Shipment) == 0
-    assert count(db, Delivery) == 0
-    # The reservation and stock deduction from checkout are kept, not reversed.
+    assert body["fulfilment"]["status"] == "DRIVER_ASSIGNED"
+    assert body["payment_status"] == "SUCCESS" and body["invoice_status"] == "PAID"
+    shipment = db.query(Shipment).one()
+    assert count(db, Delivery) == 1
+    assert shipment.route_id is None and shipment.estimated_delivery is None   # no route or ETA is made up
     assert count(db, OrderInventoryReservation, OrderInventoryReservation.order_id == order_id) == 1
     assert stock_of(db, warehouse, product) == 3
-
-
-def test_operations_resolve_route_unavailable(client, db, make, ops):
-    customer, headers = make.customer()
-    warehouse = make.warehouse("Vellore")
-    product = make.product()
-    make.stock(warehouse, product, 5)
-    chennai = make.route("Vellore", "Chennai")
-    driver, _, _ = make.driver()
-
-    order_id = checkout(client, headers, [(product, 1)], address="5 Gandhi St, Coimbatore").json()["order"]["order_id"]
-    assert pay(client, headers, order_id).json()["fulfilment"]["status"] == "ROUTE_UNAVAILABLE"
-
-    created = create_shipment(client, ops, order_id, warehouse, chennai)
-    assert created.status_code == 200
-    shipment_id = created.json()["shipment_id"]
-    assigned = client.post(f"/shipments/{shipment_id}/assign-driver", headers=ops)
-    assert assigned.status_code == 200
-    assert assigned.json()["driver_id"] == driver.employee_id
-    assert assigned.json()["order_status"] == "PROCESSING"
-
-    repeat = pay(client, headers, order_id).json()
-    assert repeat["fulfilment"]["shipment_id"] == shipment_id
-    assert repeat["fulfilment"]["status"] == "DRIVER_ASSIGNED"
-    db.expire_all()
-    assert db.query(Order.order_status).filter_by(order_id=order_id).scalar() == "PROCESSING"
-    assert db.query(Inventory.quantity).filter_by(product_id=product.product_id).scalar() == 4

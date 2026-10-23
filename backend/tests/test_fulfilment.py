@@ -1,4 +1,5 @@
 """Phase 3B: inventory reservations, payment fulfilment and driver assignment."""
+import itertools
 import threading
 from datetime import date, timedelta
 
@@ -7,9 +8,10 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func
 
 import main
+from conftest import Factory
 from main import app
 from models import (
-    Delivery, Inventory, Invoice, Order, OrderInventoryReservation, Payment,
+    Delivery, Inventory, Invoice, Order, OrderFulfilment, OrderInventoryReservation, Payment,
     Shipment, ShipmentItem, ShipmentTracking,
 )
 
@@ -25,12 +27,52 @@ def checkout(client, headers, items, address="42 Market Road, Chennai"):
     )
 
 
-def pay(client, headers, order_id, outcome="SUCCESS"):
+_ops_numbers = itertools.count(1000)
+
+
+def ops_headers():
+    """A fresh Operations Manager login (usernames are unique across calls and threads)."""
+    factory = Factory()
+    factory._counter = next(_ops_numbers)
+    return factory.user("OPERATIONS_MANAGER")[1]
+
+
+def pay_only(client, headers, order_id, outcome="SUCCESS"):
+    """The customer's payment on its own. A successful payment does not dispatch anything."""
     return client.post(
         "/shop/payments/simulate",
         json={"order_id": order_id, "outcome": outcome},
         headers=headers,
     )
+
+
+def approve(client, order_id, headers=None):
+    return client.post(f"/operations/orders/{order_id}/approve", headers=headers or ops_headers())
+
+
+class _Dispatched:
+    """Response-like: the payment response with `fulfilment` replaced by the approval's dispatch result."""
+
+    def __init__(self, payment, dispatch):
+        self.status_code = payment.status_code
+        self._body = {**payment.json(), "fulfilment": dispatch.json()}
+        self.text = payment.text
+
+    def json(self):
+        return self._body
+
+
+def pay(client, headers, order_id, outcome="SUCCESS"):
+    """Pay, then (for a successful payment) approve as an Operations Manager, which is what dispatches.
+
+    Most tests care about what happens after dispatch, so this keeps the pay-then-approve sequence in one
+    call. Tests of the sequence itself use pay_only and approve directly.
+    """
+    payment = pay_only(client, headers, order_id, outcome)
+    if outcome != "SUCCESS" or payment.status_code != 200:
+        return payment
+    dispatch = approve(client, order_id)
+    return _Dispatched(payment, dispatch) if dispatch.status_code == 200 else dispatch
 
 
 def count(db, model, *criteria):
@@ -159,8 +201,10 @@ def test_successful_payment_creates_one_shipment(client, db, shop):
     assert body["mode"] == "DEVELOPMENT_ONLY_SIMULATION"
     assert body["payment_status"] == "SUCCESS"
     assert body["invoice_status"] == "PAID"
-    assert body["order_status"] == "PROCESSING"
-    assert body["fulfilment"]["status"] == "DRIVER_ASSIGNED"
+    assert body["order_status"] == "CONFIRMED"          # payment alone does not dispatch
+    assert body["fulfilment"]["status"] == "DRIVER_ASSIGNED"   # ... approval does (pay() approves)
+    db.expire_all()
+    assert db.get(Order, order_id).order_status == "PROCESSING"
     assert body["fulfilment"]["driver_id"] == shop["driver"].employee_id
     assert body["fulfilment"]["vehicle_id"] == shop["vehicle"].vehicle_id
 
@@ -230,23 +274,27 @@ def test_failed_payment_creates_no_shipment(client, db, shop):
 def test_missing_reservations_are_handled_safely(client, db, make, shop):
     order = make.legacy_order(shop["customer"], shop["product"], quantity=2)
 
-    response = pay(client, shop["headers"], order.order_id)
+    response = pay_only(client, shop["headers"], order.order_id)
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["payment_status"] == "SUCCESS"
     assert body["invoice_status"] == "PAID"
     assert body["order_status"] == "CONFIRMED"
-    assert body["fulfilment"]["status"] == "RESERVATION_MISSING"
-    assert body["fulfilment"]["shipment_id"] is None
+    assert body["fulfilment"]["status"] == "AWAITING_APPROVAL"
+
+    # Approval is refused (not recorded) while no stock is reserved: staff must recover the reservation first.
+    approval = approve(client, order.order_id)
+    assert approval.status_code == 409 and "No stock is reserved" in approval.json()["detail"]
+    db.expire_all()
+    assert db.get(OrderFulfilment, order.order_id) is None      # no approval was recorded
 
     assert count(db, Shipment) == 0
     assert count(db, Delivery) == 0
     assert count(db, OrderInventoryReservation) == 0  # nothing invented
     assert stock_of(db, shop["warehouse"], shop["product"]) == 10
 
-    repeat = pay(client, shop["headers"], order.order_id)
+    repeat = pay_only(client, shop["headers"], order.order_id)
     assert repeat.json()["already_processed"] is True
-    assert repeat.json()["fulfilment"]["status"] == "NOT_FULFILLED"
     assert count(db, Shipment) == 0
 
 
@@ -263,7 +311,7 @@ def test_incomplete_reservations_are_not_fulfilled(client, db, make, shop):
     assert count(db, Shipment) == 0
 
 
-def test_no_route_from_origin_leaves_order_confirmed(client, db, make):
+def test_no_route_from_origin_does_not_block_fulfilment(client, db, make):
     customer, headers = make.customer()
     warehouse = make.warehouse("Madurai")  # no route leaves Madurai
     product = make.product()
@@ -272,10 +320,10 @@ def test_no_route_from_origin_leaves_order_confirmed(client, db, make):
 
     order_id = checkout(client, headers, [(product, 1)]).json()["order"]["order_id"]
     body = pay(client, headers, order_id).json()
-    assert body["fulfilment"]["status"] == "ROUTE_UNAVAILABLE"
-    assert body["order_status"] == "CONFIRMED"
+    assert body["fulfilment"]["status"] == "DRIVER_ASSIGNED"
     assert body["invoice_status"] == "PAID"
-    assert count(db, Shipment) == 0
+    shipment = db.query(Shipment).one()
+    assert shipment.route_id is None and shipment.estimated_delivery is None   # nothing made up
 
 
 # --- Driver and vehicle assignment -----------------------------------------

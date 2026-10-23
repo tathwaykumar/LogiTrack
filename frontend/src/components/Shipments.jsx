@@ -2,11 +2,18 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { ApiError, apiGet } from '../services/apiClient.js'
 import { formatDate, formatLabel } from '../lib/format.js'
 import { StageStrip } from './charts.jsx'
+import OperationsShipments from './OperationsShipments.jsx'
 import { DataTable, EmptyState, ErrorState, FilterChips, IdTag, PageHeader, Panel, RefreshButton, SearchField, SkeletonRows, StatTile, StatusBadge, stagger } from './ui.jsx'
 
 const STAGES = ['CREATED', 'PICKED_UP', 'IN_TRANSIT', 'OUT_FOR_DELIVERY', 'DELIVERED', 'CANCELLED']
 
-function Shipments({ session, onAuthExpired, onNavigate }) {
+function Shipments(props) {
+  const roleId = Number(props.session.user.roleId)
+  // Staff get the server-driven desk; drivers and customers keep the scoped list.
+  return roleId === 1 || roleId === 2 ? <OperationsShipments {...props} /> : <ScopedShipments {...props} />
+}
+
+function ScopedShipments({ session, onAuthExpired, onNavigate }) {
   const [shipments, setShipments] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')

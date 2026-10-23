@@ -1,3 +1,4 @@
+import { useEffect } from 'react'
 import { formatLabel } from '../lib/format.js'
 
 const ICON_PATHS = {
@@ -35,6 +36,7 @@ const ICON_PATHS = {
   calendar: 'M4 6h16v14H4zM4 10h16M8 3v4M16 3v4',
   fuel: 'M5 20V5a1 1 0 0 1 1-1h7a1 1 0 0 1 1 1v15M3.5 20h12M5 10h9M14 8.5l3 1.5v7a1.5 1.5 0 0 0 3 0V9l-3-3',
   weight: 'M6.5 8h11l2 12h-15zM9.5 8a2.5 2.5 0 1 1 5 0',
+  building: 'M4 21V6l8-3 8 3v15M9 21v-5h6v5M8 9.5h2M14 9.5h2M8 13h2M14 13h2',
   idcard: 'M3 5.5h18v13H3zM7.5 11.5a2 2 0 1 0 0-4 2 2 0 0 0 0 4ZM4.5 16a3 3 0 0 1 6 0M13 9h5M13 12.5h5',
 }
 
@@ -276,4 +278,47 @@ export function Avatar({ text, className = 'size-10', tone = 'lime' }) {
 /** Apply staggered entrance delays to grid children. */
 export function stagger(index, step = 60) {
   return { animationDelay: `${index * step}ms` }
+}
+
+
+/** Right-hand detail panel. Closes on Escape or a click on the backdrop. */
+export function Drawer({ open, title, eyebrow, onClose, children, wide = false }) {
+  useEffect(() => {
+    if (!open) return undefined
+    const onKey = (event) => { if (event.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [open, onClose])
+  if (!open) return null
+  return (
+    <div className="fixed inset-0 z-50">
+      <button type="button" aria-label="Close details" className="animate-fade absolute inset-0 bg-ink/50" onClick={onClose} />
+      <aside role="dialog" aria-modal="true" aria-label={title} className={`animate-rise absolute inset-y-0 right-0 flex w-full flex-col bg-ivory shadow-[var(--shadow-lift)] ${wide ? 'max-w-3xl' : 'max-w-xl'}`}>
+        <div className="on-dark flex items-start justify-between gap-4 bg-ink px-6 py-5 text-paper">
+          <div className="min-w-0">
+            {eyebrow && <p className="eyebrow text-lime">{eyebrow}</p>}
+            <h2 className="font-display mt-1 truncate text-2xl font-semibold">{title}</h2>
+          </div>
+          <button type="button" onClick={onClose} aria-label="Close" className="grid size-10 shrink-0 place-items-center rounded-full text-paper/70 hover:bg-paper/10"><Icon name="x" className="size-5" /></button>
+        </div>
+        <div className="scrollbar-thin flex-1 overflow-y-auto p-5 sm:p-6">{children}</div>
+      </aside>
+    </div>
+  )
+}
+
+export function Pagination({ page, pages, total, pageSize, onPage }) {
+  if (!total) return null
+  const from = (page - 1) * pageSize + 1
+  const to = Math.min(total, page * pageSize)
+  return (
+    <nav aria-label="Pagination" className="flex flex-col items-center justify-between gap-3 border-t border-line px-5 py-3 text-sm sm:flex-row sm:px-6">
+      <p className="text-stone" aria-live="polite">Showing {from}–{to} of {total}</p>
+      <div className="flex items-center gap-2">
+        <button type="button" className="btn btn-outline py-1.5!" disabled={page <= 1} onClick={() => onPage(page - 1)}>Previous</button>
+        <span className="eyebrow text-stone">Page {page} of {Math.max(1, pages)}</span>
+        <button type="button" className="btn btn-outline py-1.5!" disabled={page >= pages} onClick={() => onPage(page + 1)}>Next</button>
+      </div>
+    </nav>
+  )
 }

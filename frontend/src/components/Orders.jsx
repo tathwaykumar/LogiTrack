@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { ApiError, apiGet } from '../services/apiClient.js'
+import { ApiError, apiGet, apiPost } from '../services/apiClient.js'
 import { formatCurrency, formatDate, formatLabel } from '../lib/format.js'
 import ProductImage from './ProductImage.jsx'
-import { EmptyState, ErrorState, FilterChips, Icon, PageHeader, RefreshButton, SearchField, SkeletonRows, StatTile, StatusBadge, stagger } from './ui.jsx'
+import OrderTracker from './OrderTracker.jsx'
+import { EmptyState, ErrorState, FilterChips, Icon, Notice, PageHeader, RefreshButton, SearchField, SkeletonRows, StatTile, StatusBadge, stagger } from './ui.jsx'
 
 const ORDER_STATUSES = ['PENDING', 'CONFIRMED', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED']
 
 function Orders({ session, onAuthExpired }) {
+  const [notice, setNotice] = useState(null)
   const [orders, setOrders] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -76,6 +78,21 @@ function Orders({ session, onAuthExpired }) {
     ...ORDER_STATUSES.filter((status) => statusCounts[status]).map((status) => ({ value: status, label: formatLabel(status), count: statusCounts[status] })),
   ]
 
+  async function cancelOrder(orderId) {
+    setNotice(null)
+    try {
+      const outcome = await apiPost(`/orders/${orderId}/cancel`, {}, session.accessToken)
+      setNotice({ tone: 'info', text: `Order #${orderId}: ${outcome.message}.` })
+      setRefreshKey((key) => key + 1)
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        onAuthExpired()
+        return
+      }
+      setNotice({ tone: 'error', text: err.message || 'Unable to cancel the order.' })
+    }
+  }
+
   const totalValue = orders.reduce((sum, order) => sum + (orderAmountValue(order) ?? 0), 0)
 
   return (
@@ -93,6 +110,8 @@ function Orders({ session, onAuthExpired }) {
         <StatTile label="Open orders" value={loading ? '—' : pendingCount} hint="Not yet delivered or cancelled" icon="clock" tone="lime" loading={loading && !orders.length} style={stagger(1)} />
         <StatTile label="Order value" value={loading ? '—' : formatCurrency(totalValue)} hint="Sum of item totals" icon="wallet" tone="ink" loading={loading && !orders.length} style={stagger(2)} />
       </div>
+
+      {notice && <Notice tone={notice.tone}>{notice.text}</Notice>}
 
       <section className="space-y-5">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
@@ -116,7 +135,7 @@ function Orders({ session, onAuthExpired }) {
           </div>
         ) : (
           <div className="space-y-4">
-            {filteredOrders.map((order, index) => <OrderTicket key={order.order_id ?? index} order={order} index={index} />)}
+            {filteredOrders.map((order, index) => <OrderTicket key={order.order_id ?? index} order={order} index={index} session={session} onAuthExpired={onAuthExpired} onCancel={cancelOrder} />)}
           </div>
         )}
       </section>
@@ -131,7 +150,10 @@ function orderAmountValue(order) {
   return items.reduce((sum, item) => sum + Number(item.item_total ?? Number(item.quantity ?? 0) * Number(item.unit_price ?? 0)), 0)
 }
 
-function OrderTicket({ order, index }) {
+function OrderTicket({ order, index, session, onAuthExpired, onCancel }) {
+  const [showJourney, setShowJourney] = useState(false)
+  const [confirming, setConfirming] = useState(false)
+  const cancellable = order.order_status === 'PENDING' && order.payment_status !== 'SUCCESS'
   const items = order.items ?? []
   const amount = orderAmountValue(order)
   return (
@@ -141,7 +163,10 @@ function OrderTicket({ order, index }) {
           <div>
             <p className="eyebrow text-stone">Order</p>
             <p className="font-display mt-1 text-4xl font-semibold">#{order.order_id ?? '—'}</p>
-            <div className="mt-3"><StatusBadge status={order.order_status} /></div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <StatusBadge status={order.order_status} />
+              {order.stage && <StatusBadge status={({ PAYMENT_FAILED: 'FAILED', CANCELLED: 'CANCELLED', DELIVERED: 'DELIVERED', AWAITING_PAYMENT: 'PENDING', AWAITING_APPROVAL: 'PENDING' })[order.stage.key] ?? 'ACTIVE'} label={order.stage.label} />}
+            </div>
           </div>
           <dl className="space-y-3 text-sm">
             <div className="flex items-center gap-2 text-stone"><Icon name="calendar" className="size-4" /><dd>{formatDate(order.order_date)}</dd></div>
@@ -176,6 +201,18 @@ function OrderTicket({ order, index }) {
               ))}
             </ul>
           )}
+          <div className="flex flex-wrap items-center gap-2 border-t border-line px-3 pt-3 pb-1">
+            <button type="button" className="btn btn-outline py-1.5!" aria-expanded={showJourney} onClick={() => setShowJourney((open) => !open)}>{showJourney ? 'Hide journey' : 'Track this order'}</button>
+            {cancellable && !confirming && <button type="button" className="btn btn-outline py-1.5!" onClick={() => setConfirming(true)}>Cancel order</button>}
+            {cancellable && confirming && (
+              <span className="inline-flex items-center gap-2 text-sm">
+                Cancel and release reserved stock?
+                <button type="button" className="btn btn-ink py-1.5!" onClick={() => { setConfirming(false); onCancel(order.order_id) }}>Yes, cancel</button>
+                <button type="button" className="btn btn-outline py-1.5!" onClick={() => setConfirming(false)}>Keep</button>
+              </span>
+            )}
+          </div>
+          {showJourney && <div className="p-3 sm:p-4"><OrderTracker orderId={order.order_id} session={session} onAuthExpired={onAuthExpired} /></div>}
         </div>
       </div>
     </article>

@@ -2,3 +2,7 @@ backend/venv/
 backend/.env
 __pycache__/
 *.pyc
+
+# Frontend dependencies and generated build output (reinstall with npm install; rebuild with npm run build)
+frontend/node_modules/
+frontend/dist/

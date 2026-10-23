@@ -472,8 +472,8 @@ function CartPanel({ cartItems, cartCount, subtotal, shippingAddress, checkingOu
             </div>
             <p className="text-xs leading-5 text-stone">The final amount is recalculated from current prices at checkout. Payment is not collected at this step.</p>
             <label className="block">
-              <span className="field-label">Shipping address</span>
-              <textarea required value={shippingAddress} onChange={(event) => onAddressChange(event.target.value)} maxLength="255" rows="2" placeholder="House, street, city" className="field resize-y" />
+              <span className="field-label">Delivery address</span>
+              <textarea required value={shippingAddress} onChange={(event) => onAddressChange(event.target.value)} maxLength="255" rows="3" placeholder="House or flat, street, area, city and PIN code" className="field resize-y" />
             </label>
             {error && <Notice tone="error">{error}</Notice>}
             <button type="submit" disabled={checkingOut} className="btn btn-lime w-full justify-between! px-5! py-3.5! text-base!">
@@ -490,6 +490,7 @@ function CartPanel({ cartItems, cartCount, subtotal, shippingAddress, checkingOu
 function Receipt({ receipt, onClose, onPay }) {
   const order = receipt.order ?? {}
   const invoice = receipt.invoice ?? {}
+  const plan = receipt.fulfilment
   return (
     <section role="status" className="animate-rise on-dark relative overflow-hidden rounded-[2rem] bg-ink p-6 text-paper sm:p-9">
       <span className="absolute -top-16 -right-16 size-56 rounded-full bg-lime/15" aria-hidden="true" />
@@ -500,6 +501,7 @@ function Receipt({ receipt, onClose, onPay }) {
             <p className="eyebrow text-lime">Order confirmed</p>
             <h2 className="font-display mt-1 text-3xl font-semibold sm:text-4xl">Order #{order.order_id} is in.</h2>
             <p className="mt-2 max-w-xl text-paper/70">Invoice #{invoice.invoice_id} has been issued for {formatCurrency(invoice.total_amount)}. Payment is still pending.</p>
+            {plan?.dispatch && <p className="mt-2 max-w-xl text-sm text-paper/70">{plan.dispatch}</p>}
           </div>
         </div>
         <div className="flex shrink-0 flex-wrap gap-2">
